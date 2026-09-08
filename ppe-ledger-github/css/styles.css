@@ -71,20 +71,30 @@
   .brand .sub{ font-size:11px; color:var(--ink-faint); margin-top:2px; letter-spacing:.02em; }
 
   /* ---------- Fund switcher ---------- */
-  .fundswitch{ padding:10px 10px 8px; border-bottom:1px solid var(--line); display:flex; flex-direction:column; gap:2px; }
-  .fundswitch button{
-    text-align:left; padding:7px 9px; border-radius:8px; border:none; background:transparent;
-    color:var(--ink-soft); font-size:12.5px; font-weight:500; cursor:pointer; display:flex;
-    align-items:center; gap:8px; transition:background .12s ease, color .12s ease; width:100%;
+  #fundSwitch{
+    padding:12px 10px; border-bottom:1px solid var(--line);
+    display:flex; flex-direction:column; gap:3px; background:var(--paper-sunken);
   }
-  .fundswitch button b{
-    font-family:"Roboto Mono",monospace; font-size:10px; min-width:26px; text-align:center;
-    color:var(--ink-faint); font-weight:700; border:1px solid var(--line); border-radius:5px;
-    padding:2px 3px; flex:none; letter-spacing:.02em;
+  /* #fundSwitch (an ID, not just .fundswitch) so these rules always win over any generic
+     `button{...}` reset elsewhere — the switcher should never fall back to bare browser button
+     chrome (a bordered box, default bold text, no spacing) if something else loads after this file. */
+  #fundSwitch button{
+    all:unset; box-sizing:border-box; cursor:pointer;
+    display:flex; align-items:center; gap:9px; width:100%;
+    padding:7px 10px; border-radius:8px;
+    color:var(--ink-soft); font-family:inherit; font-size:12.5px; font-weight:500; line-height:1.3;
+    transition:background .12s ease, color .12s ease;
   }
-  .fundswitch button:hover{ background:var(--line-soft); color:var(--ink); }
-  .fundswitch button.active{ background:var(--accent-soft); color:var(--accent-strong); font-weight:600; }
-  .fundswitch button.active b{ color:var(--accent-strong); border-color:var(--accent-strong); }
+  #fundSwitch button .fundcode{
+    flex:none; display:inline-block; min-width:26px; text-align:center;
+    font-family:"Roboto Mono",monospace; font-size:9.5px; font-weight:700; letter-spacing:.03em;
+    color:var(--ink-faint); background:var(--paper-raised); border:1px solid var(--line);
+    border-radius:99px; padding:3px 7px; line-height:1.3;
+  }
+  #fundSwitch button .fundlabel{ white-space:normal; }
+  #fundSwitch button:hover{ background:var(--line-soft); color:var(--ink); }
+  #fundSwitch button.active{ background:var(--accent-soft); color:var(--accent-strong); font-weight:600; }
+  #fundSwitch button.active .fundcode{ color:#fff; background:var(--accent); border-color:var(--accent); }
 
   nav{ padding:10px; display:flex; flex-direction:column; gap:2px; flex:1; }
   nav button{
@@ -224,8 +234,8 @@
     .brand h1,.brand .sub,nav button span.label{ display:none; }
     .brand .seal{ justify-content:center; }
     nav button{ justify-content:center; }
-    .fundswitch button .fundlabel{ display:none; }
-    .fundswitch button{ justify-content:center; }
+    #fundSwitch button .fundlabel{ display:none; }
+    #fundSwitch button{ justify-content:center; }
     .fieldrow,.fieldrow3{ grid-template-columns:1fr; }
   }
 /* ---------- Sign-in screen ---------- */
