@@ -1,4 +1,4 @@
-  *,*::before,*::after{ box-sizing:border-box; }
+*,*::before,*::after{ box-sizing:border-box; }
   html,body{ margin:0; padding:0; }
   :root{
     --paper:#f6f3ea; --paper-raised:#ffffff; --paper-sunken:#efeadb;
@@ -64,7 +64,9 @@
     width:34px; height:34px; border-radius:50%; border:1.5px solid var(--accent);
     display:flex; align-items:center; justify-content:center; font-family:"Source Serif 4",serif;
     font-weight:700; color:var(--accent-strong); font-size:14px; flex:none;
+    overflow:hidden; background:#fff;
   }
+  .brand .mark img{ width:100%; height:100%; object-fit:cover; border-radius:50%; }
   .brand h1{ font-size:16px; font-weight:600; margin:0; line-height:1.2; }
   .brand .sub{ font-size:11px; color:var(--ink-faint); margin-top:2px; letter-spacing:.02em; }
 
@@ -222,7 +224,9 @@
   width:38px; height:38px; border-radius:50%; border:1.5px solid var(--accent);
   display:flex; align-items:center; justify-content:center; font-family:"Source Serif 4",serif;
   font-weight:700; color:var(--accent-strong); font-size:16px; flex:none;
+  overflow:hidden; background:#fff;
 }
+.signin-card .mark img{ width:100%; height:100%; object-fit:cover; border-radius:50%; }
 .signin-card h1{ font-size:18px; font-weight:600; margin:0; line-height:1.2; }
 .signin-card .sub{ font-size:11.5px; color:var(--ink-faint); margin-top:2px; }
 .signin-card .field{ margin-bottom:14px; }
