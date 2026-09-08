@@ -223,7 +223,13 @@ function computeReconciliation(period) {
     const tbAD = accounts && accounts[adCode] ? Number(accounts[adCode].credit || 0) : null;
     const varCost = tbCost == null ? null : round2(regCost - tbCost);
     const varAD = tbAD == null ? null : round2(regAD - tbAD);
-    const ok = tbCost != null && Math.abs(varCost) < 1 && (!accountInfo(code).depreciable || (tbAD != null && Math.abs(varAD) < 1));
+    // Trial Balance exports commonly omit a line entirely when its balance is zero, rather than
+    // listing it as 0 — so a missing AD line only counts against reconciliation if the register
+    // itself shows a nonzero accumulated depreciation for that account (a real, unexplained gap).
+    // A missing AD line paired with ₱0.00 register AD (e.g. an asset that hasn't started
+    // depreciating yet) is not a variance worth flagging.
+    const adOk = !accountInfo(code).depreciable || (tbAD != null ? Math.abs(varAD) < 1 : Math.abs(regAD) < 1);
+    const ok = tbCost != null && Math.abs(varCost) < 1 && adOk;
     return { code, name, adCode, regCost, regAD, tbCost, tbAD, varCost, varAD, ok, hasTb: !!accounts };
   });
 }
