@@ -46,7 +46,7 @@
     font-size:14px; line-height:1.5;
   }
   h1,h2,h3,.serif{ font-family:"Source Serif 4", Georgia, serif; text-wrap:balance; }
-  .mono, .num, td.num, th.num{ font-family:"IBM Plex Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
+  .mono, .num, td.num, th.num{ font-family:"Roboto Mono", ui-monospace, monospace; font-variant-numeric: tabular-nums; }
   a{ color:var(--accent-strong); }
   button{ font-family:inherit; }
   ::selection{ background:var(--accent-soft); }
@@ -76,7 +76,7 @@
     color:var(--ink-soft); font-size:13.5px; font-weight:500; cursor:pointer; display:flex;
     align-items:center; gap:9px; transition:background .12s ease, color .12s ease;
   }
-  nav button .ico{ font-family:"IBM Plex Mono",monospace; font-size:11px; width:18px; text-align:center; color:var(--ink-faint); }
+  nav button .ico{ font-family:"Roboto Mono",monospace; font-size:11px; width:18px; text-align:center; color:var(--ink-faint); }
   nav button:hover{ background:var(--line-soft); color:var(--ink); }
   nav button.active{ background:var(--accent-soft); color:var(--accent-strong); font-weight:600; }
   nav button.active .ico{ color:var(--accent-strong); }
@@ -106,7 +106,7 @@
   .cardrow{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; margin-bottom:20px; }
   .card{ background:var(--paper-raised); border:1px solid var(--line); border-radius:var(--radius); padding:16px 18px; box-shadow:var(--shadow); }
   .card .label{ font-size:11.5px; text-transform:uppercase; letter-spacing:.06em; color:var(--ink-faint); font-weight:600; }
-  .card .value{ font-family:"IBM Plex Mono",monospace; font-size:22px; font-weight:600; margin-top:6px; font-variant-numeric:tabular-nums; }
+  .card .value{ font-family:"Roboto Mono",monospace; font-size:22px; font-weight:600; margin-top:6px; font-variant-numeric:tabular-nums; }
   .card .foot{ font-size:12px; color:var(--ink-soft); margin-top:4px; }
 
   .panel{ background:var(--paper-raised); border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow); margin-bottom:20px; }
@@ -136,7 +136,7 @@
     font-family:inherit; font-size:13px; padding:8px 10px; border-radius:7px; border:1px solid var(--line);
     background:var(--paper-raised); color:var(--ink); width:100%;
   }
-  textarea{ font-family:"IBM Plex Mono",monospace; font-size:12.5px; resize:vertical; }
+  textarea{ font-family:"Roboto Mono",monospace; font-size:12.5px; resize:vertical; }
   label{ font-size:12px; font-weight:600; color:var(--ink-soft); display:block; margin-bottom:4px; }
   .field{ margin-bottom:12px; }
   .fieldrow{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }
