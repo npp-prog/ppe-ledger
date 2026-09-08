@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PPE Ledger</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,500;8..60,600;8..60,700&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+
+<!-- ============ Sign-in screen (shown when signed out) ============ -->
+<div id="signin-screen">
+  <div class="signin-card">
+    <div class="seal">
+      <div class="mark">M</div>
+      <div>
+        <h1>PPE Ledger</h1>
+        <div class="sub">MGO &middot; Candoni</div>
+      </div>
+    </div>
+    <div class="signin-error" id="signinError"></div>
+    <form id="signinForm">
+      <div class="field">
+        <label for="signinEmail">Email</label>
+        <input type="email" id="signinEmail" autocomplete="username" required>
+      </div>
+      <div class="field">
+        <label for="signinPassword">Password</label>
+        <input type="password" id="signinPassword" autocomplete="current-password" required>
+      </div>
+      <button type="submit" class="btn primary block" id="signinSubmitBtn">Sign in</button>
+    </form>
+    <div class="signin-links">
+      <a id="forgotPasswordLink">Forgot password?</a>
+    </div>
+    <div class="signin-divider">or</div>
+    <button type="button" class="btn block" id="googleSignInBtn">Continue with Google</button>
+  </div>
+</div>
+
+<!-- ============ Main app (shown when signed in) ============ -->
+<div id="app" hidden>
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="seal">
+        <div class="mark">M</div>
+        <div>
+          <h1>PPE Ledger</h1>
+          <div class="sub">MGO &middot; Candoni</div>
+        </div>
+      </div>
+    </div>
+    <nav id="nav">
+      <button data-view="dashboard" class="active"><span class="ico">01</span><span class="label">Dashboard</span></button>
+      <button data-view="register"><span class="ico">02</span><span class="label">Asset Register</span></button>
+      <button data-view="depreciation"><span class="ico">03</span><span class="label">Monthly Depreciation</span></button>
+      <button data-view="reconciliation"><span class="ico">04</span><span class="label">Reconciliation</span></button>
+      <button data-view="retired"><span class="ico">05</span><span class="label">Retired Assets</span></button>
+    </nav>
+    <div class="sidebar-foot">
+      <div>Signed in as</div>
+      <div class="auth-chip">
+        <span class="email" id="authEmail">&mdash;</span>
+        <button class="btn small ghost" id="signOutBtn" type="button">Sign out</button>
+      </div>
+    </div>
+  </aside>
+
+  <div id="main">
+    <div id="topbar">
+      <div>
+        <h2 id="viewTitle">Dashboard</h2>
+        <div class="meta" id="viewSubtitle">Straight-line PPE depreciation &middot; General Fund</div>
+      </div>
+      <div style="text-align:right;">
+        <div class="meta"><span id="syncdot"></span><span id="syncstatus">Connecting&hellip;</span></div>
+        <div class="meta" id="periodStatus"></div>
+      </div>
+    </div>
+    <div id="content">
+      <div class="view active" id="view-dashboard"></div>
+      <div class="view" id="view-register"></div>
+      <div class="view" id="view-depreciation"></div>
+      <div class="view" id="view-reconciliation"></div>
+      <div class="view" id="view-retired"></div>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="modalOverlay"><div class="modal" id="modalRoot"></div></div>
+<div class="toast" id="toast"></div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>

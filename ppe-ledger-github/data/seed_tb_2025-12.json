@@ -1,0 +1,306 @@
+{
+ "period": "2025-12",
+ "source": "TB_20251231.xlsx",
+ "accounts": {
+  "10701010": {
+   "name": "Land",
+   "debit": 145163878.6,
+   "credit": 0.0
+  },
+  "10702990": {
+   "name": "Other Land Improvements",
+   "debit": 1692579.78,
+   "credit": 0.0
+  },
+  "10702991": {
+   "name": "Accumulated Depreciation - Other Land Improvements",
+   "debit": 0.0,
+   "credit": 292455.46
+  },
+  "10703020": {
+   "name": "Flood Control Systems",
+   "debit": 5155275.61,
+   "credit": 0.0
+  },
+  "10703021": {
+   "name": "Accumulated Depreciation - Flood Control Systems",
+   "debit": 0.0,
+   "credit": 2589922.03
+  },
+  "10703040": {
+   "name": "Water Supply Systems",
+   "debit": 11922079.5,
+   "credit": 0.0
+  },
+  "10703041": {
+   "name": "Accumulated Depreciation - Water Supply Systems",
+   "debit": 0.0,
+   "credit": 2386401.41
+  },
+  "10703050": {
+   "name": "Power Supply Systems",
+   "debit": 450000.0,
+   "credit": 0.0
+  },
+  "10703051": {
+   "name": "Accumulated Depreciation - Power Supply Systems",
+   "debit": 0.0,
+   "credit": 112500.0
+  },
+  "10703090": {
+   "name": "Parks, Plazas and Monuments",
+   "debit": 3059186.19,
+   "credit": 0.0
+  },
+  "10703091": {
+   "name": "Accumulated Depreciation - Parks, Plazas and Monuments",
+   "debit": 0.0,
+   "credit": 185959.31
+  },
+  "10703990": {
+   "name": "Other Infrastructure Assets",
+   "debit": 8210633.64,
+   "credit": 0.0
+  },
+  "10703991": {
+   "name": "Accumulated Depreciation - Other Infrastructure Assets",
+   "debit": 0.0,
+   "credit": 864844.67
+  },
+  "10704010": {
+   "name": "Buildings",
+   "debit": 29306429.95,
+   "credit": 0.0
+  },
+  "10704011": {
+   "name": "Accumulated Depreciation - Buildings",
+   "debit": 0.0,
+   "credit": 10590182.69
+  },
+  "10704030": {
+   "name": "Hospitals and Health Centers",
+   "debit": 6742856.75,
+   "credit": 0.0
+  },
+  "10704031": {
+   "name": "Accumulated Depreciation - Hospitals and Health Centers",
+   "debit": 0.0,
+   "credit": 1981656.14
+  },
+  "10704040": {
+   "name": "Markets",
+   "debit": 50000000.0,
+   "credit": 0.0
+  },
+  "10704041": {
+   "name": "Accumulated Depreciation - Markets",
+   "debit": 0.0,
+   "credit": 4750000.04
+  },
+  "10704990": {
+   "name": "Other Structures",
+   "debit": 29970384.83,
+   "credit": 0.0
+  },
+  "10704991": {
+   "name": "Accumulated Depreciation - Other Structures",
+   "debit": 0.0,
+   "credit": 4383135.41
+  },
+  "10705020": {
+   "name": "Office Equipment",
+   "debit": 2063166.5,
+   "credit": 0.0
+  },
+  "10705021": {
+   "name": "Accumulated Depreciation - Office Equipment",
+   "debit": 0.0,
+   "credit": 756648.5
+  },
+  "10705040": {
+   "name": "Agricultural and Forestry Equipment",
+   "debit": 1733800.0,
+   "credit": 0.0
+  },
+  "10705041": {
+   "name": "Accumulated Depreciation - Agricultural and Forestry Equipment",
+   "debit": 0.0,
+   "credit": 656827.27
+  },
+  "10705070": {
+   "name": "Communication Equipment",
+   "debit": 490000.0,
+   "credit": 0.0
+  },
+  "10705071": {
+   "name": "Accumulated Depreciation - Communication Equipment",
+   "debit": 0.0,
+   "credit": 465500.04
+  },
+  "10705080": {
+   "name": "Construction and Heavy Equipment",
+   "debit": 43216000.0,
+   "credit": 0.0
+  },
+  "10705081": {
+   "name": "Accumulated Depreciation - Construction and Heavy Equipment",
+   "debit": 0.0,
+   "credit": 9191582.53
+  },
+  "10705090": {
+   "name": "Disaster Response and Rescue Equipment",
+   "debit": 11233250.0,
+   "credit": 0.0
+  },
+  "10705091": {
+   "name": "Accumulated Depreciation - Disaster Response and Rescue Equipment",
+   "debit": 0.0,
+   "credit": 7231483.4
+  },
+  "10705110": {
+   "name": "Medical Equipment",
+   "debit": 937397.33,
+   "credit": 0.0
+  },
+  "10705111": {
+   "name": "Accumulated Depreciation - Medical Equipment",
+   "debit": 0.0,
+   "credit": 804597.46
+  },
+  "10705120": {
+   "name": "Printing Equipment",
+   "debit": 200000.0,
+   "credit": 0.0
+  },
+  "10705121": {
+   "name": "Accumulated Depreciation - Printing Equipment",
+   "debit": 0.0,
+   "credit": 160312.5
+  },
+  "10705140": {
+   "name": "Technical and Scientific Equipment",
+   "debit": 2416643.0,
+   "credit": 0.0
+  },
+  "10705141": {
+   "name": "Accumulated Depreciation - Technical and Scientific Equipment",
+   "debit": 0.0,
+   "credit": 1474069.81
+  },
+  "10705990": {
+   "name": "Other Machinery and Equipment",
+   "debit": 7599301.29,
+   "credit": 0.0
+  },
+  "10705991": {
+   "name": "Accumulated Depreciation - Other Machinery and Equipment",
+   "debit": 0.0,
+   "credit": 2405060.43
+  },
+  "10706010": {
+   "name": "Motor Vehicles",
+   "debit": 8512883.3,
+   "credit": 0.0
+  },
+  "10706011": {
+   "name": "Accumulated Depreciation - Motor Vehicles",
+   "debit": 0.0,
+   "credit": 6760380.63
+  },
+  "10707010": {
+   "name": "Furniture and Fixtures",
+   "debit": 71000.0,
+   "credit": 0.0
+  },
+  "10707011": {
+   "name": "Accumulated Depreciation - Furniture and Fixtures",
+   "debit": 0.0,
+   "credit": 28070.92
+  },
+  "10710010": {
+   "name": "Construction in Progress - Land Improvements",
+   "debit": 7667616.82,
+   "credit": 0.0
+  },
+  "10710020": {
+   "name": "Construction in Progress - Infrastructure Assets",
+   "debit": 39993936.43,
+   "credit": 0.0
+  },
+  "10710030": {
+   "name": "Construction in Progress - Buildings and Other Structures",
+   "debit": 6826756.78,
+   "credit": 0.0
+  },
+  "10799010": {
+   "name": "Work/Zoo Animals",
+   "debit": 40000.0,
+   "credit": 0.0
+  },
+  "10799990": {
+   "name": "Other Property, Plant and Equipment",
+   "debit": 8322345.43,
+   "credit": 0.0
+  },
+  "10799991": {
+   "name": "Accumulated Depreciation - Other Property, Plant and Equipment",
+   "debit": 0.0,
+   "credit": 7704637.69
+  },
+  "10801020": {
+   "name": "Plants and Trees",
+   "debit": 0.0,
+   "credit": 0.0
+  },
+  "10901020": {
+   "name": "Computer Software",
+   "debit": 96000.0,
+   "credit": 0.0
+  },
+  "10901021": {
+   "name": "Accumulated Amortization - Computer Software",
+   "debit": 0.0,
+   "credit": 90959.66
+  },
+  "50501020": {
+   "name": "Depreciation - Land Improvements",
+   "debit": 160795.07,
+   "credit": 0.0
+  },
+  "50501030": {
+   "name": "Depreciation - Infrastructure Assets",
+   "debit": 11998934.19,
+   "credit": 0.0
+  },
+  "50501040": {
+   "name": "Depreciation - Buildings and Other Structures",
+   "debit": 5058127.89,
+   "credit": 0.0
+  },
+  "50501050": {
+   "name": "Depreciation - Machinery and Equipment",
+   "debit": 5171901.94,
+   "credit": 0.0
+  },
+  "50501060": {
+   "name": "Depreciation - Transportation Equipment",
+   "debit": 2311876.93,
+   "credit": 0.0
+  },
+  "50501070": {
+   "name": "Depreciation - Furniture, Fixtures and Books",
+   "debit": 12435.5,
+   "credit": 0.0
+  },
+  "50501990": {
+   "name": "Depreciation - Other Property, Plant and Equipment",
+   "debit": 37525.04,
+   "credit": 0.0
+  },
+  "50502010": {
+   "name": "Amortization - Intangible Assets",
+   "debit": 3040.0,
+   "credit": 0.0
+  }
+ }
+}
