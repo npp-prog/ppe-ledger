@@ -128,6 +128,7 @@ const S = {
   view: "dashboard",
   currentUser: null,      // Firebase Auth user, set by initApp()
   registerFilter: { q: "", category: "", status: "active" },
+  reportsFilter: { q: "", category: "", status: "active" },
   depPeriod: null,   // chosen period for Monthly Depreciation view
   reconPeriod: null, // chosen period for Reconciliation view
   reconDraft: "",    // unsaved Trial Balance text (pasted or uploaded) not yet tied to a saved period
@@ -458,9 +459,9 @@ function renderRegister() {
   document.getElementById("regCategory").addEventListener("change", e => { S.registerFilter.category = e.target.value; renderRegister(); });
   document.getElementById("regStatus").addEventListener("change", e => { S.registerFilter.status = e.target.value; renderRegister(); });
 }
-/** Assets matching the Asset Register's current search/category/status filters, in on-screen order. */
-function filteredRegisterRows() {
-  const f = S.registerFilter;
+/** Assets matching a {q, category, status} filter object, in on-screen order. Shared by the
+ *  Asset Register and Reports views, which each keep their own independent filter state. */
+function filterAssetRows(f) {
   let rows = [...S.assets.values()];
   if (f.status !== "all") rows = rows.filter(a => a.status === f.status);
   if (f.category) rows = rows.filter(a => a.account_name === f.category);
@@ -472,6 +473,8 @@ function filteredRegisterRows() {
   rows.sort((a, b) => (a.account_name || "").localeCompare(b.account_name) || (a.property_id || "").localeCompare(b.property_id || ""));
   return rows;
 }
+/** Assets matching the Asset Register's current search/category/status filters, in on-screen order. */
+function filteredRegisterRows() { return filterAssetRows(S.registerFilter); }
 function exportRegisterCsv() {
   const rows = filteredRegisterRows();
   const out = [["Property ID", "Category", "Description", "Location", "Accountable Officer", "Date Acquired", "Cost", "Residual Value", "Useful Life (yrs)", "Accum. Depr.", "Carrying Amount", "Status"]];
@@ -1331,6 +1334,69 @@ function printPropertyCardsBulk() {
 }
 
 /* ============================================================
+   RENDER: Reports — the dedicated, discoverable home for generating the
+   Equipment Ledger Card and Property Card (also reachable per-asset from
+   the Asset Register / asset detail modal, and in bulk from the Register
+   toolbar — this view exists so the reports have their own clearly-labeled
+   place in the sidebar, since "print buttons buried in a modal" turned out
+   not to be discoverable enough).
+   ============================================================ */
+function renderReports() {
+  const el = document.getElementById("view-reports");
+  if (!el) return; // older index.html without the Reports nav tab/container — nothing to render into
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const f = S.reportsFilter;
+  const categories = [...new Set([...S.assets.values()].map(a => a.account_name))].sort();
+  const rows = filterAssetRows(f);
+  el.innerHTML = `
+    <div class="panel">
+      <div class="panel-head"><div><h3>Equipment Ledger Card &amp; Property Card</h3>
+        <div class="desc">Printable, per-asset reports matching your official paper forms. Pick an asset below for its own reports, or print the whole filtered list at once.</div></div>
+      </div>
+      <div class="toolbar">
+        <input type="text" class="grow" id="repSearch" placeholder="Search description, property ID, location, officer…" value="${esc(f.q)}">
+        <select id="repCategory"><option value="">All categories</option>${categories.map(c => `<option ${c === f.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+        <select id="repStatus">
+          <option value="active" ${f.status === "active" ? "selected" : ""}>Active</option>
+          <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
+        </select>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="printLedgerCardsBulkReports()">Print Ledger Cards (${rows.length})</button>
+        <button class="btn" onclick="printPropertyCardsBulkReports()">Print Property Cards (${rows.length})</button>
+      </div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>Property ID</th><th>Category</th><th>Description</th><th>Status</th><th style="width:210px;">Reports</th></tr></thead>
+        <tbody>${rows.length ? rows.map(a => `
+          <tr>
+            <td class="mono">${esc(a.property_id) || "—"}</td>
+            <td>${esc(a.account_name)}</td>
+            <td class="truncate" title="${esc(a.description)}">${esc(a.description) || "—"}</td>
+            <td>${a.status === "retired" ? '<span class="pill neutral">Retired</span>' : '<span class="pill good">Active</span>'}</td>
+            <td>
+              <button class="btn" style="margin-right:6px;" onclick="printLedgerCard('${a.id}')">Ledger Card</button>
+              <button class="btn" onclick="printPropertyCard('${a.id}')">Property Card</button>
+            </td>
+          </tr>`).join("") : `<tr><td colspan="5"><div class="empty">No assets match these filters.</div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>
+  `;
+  document.getElementById("repSearch").addEventListener("input", e => { S.reportsFilter.q = e.target.value; renderReports(); });
+  document.getElementById("repCategory").addEventListener("change", e => { S.reportsFilter.category = e.target.value; renderReports(); });
+  document.getElementById("repStatus").addEventListener("change", e => { S.reportsFilter.status = e.target.value; renderReports(); });
+}
+function printLedgerCardsBulkReports() {
+  const rows = filterAssetRows(S.reportsFilter);
+  if (!rows.length) return toast("No assets match the current filters.");
+  openPrintWindow("Equipment Ledger Cards", printCardsHtml("Equipment Ledger Cards", rows.map(ledgerCardCardHtml).join("")));
+}
+function printPropertyCardsBulkReports() {
+  const rows = filterAssetRows(S.reportsFilter);
+  if (!rows.length) return toast("No assets match the current filters.");
+  openPrintWindow("Property Cards", printCardsHtml("Property Cards", rows.map(propertyCardCardHtml).join("")));
+}
+
+/* ============================================================
    RENDER: shared shell
    ============================================================ */
 function renderAll() {
@@ -1340,6 +1406,7 @@ function renderAll() {
   renderDepreciation();
   renderReconciliation();
   renderRetired();
+  renderReports();
 }
 function renderPeriodStatus() {
   const last = lastPostedPeriod();
@@ -1356,6 +1423,7 @@ function setView(v) {
     depreciation: ["Monthly Depreciation", "Compute, post, and generate the JEV summary for a period"],
     reconciliation: ["Reconciliation", "Compare the register against your Trial Balance, by account code"],
     retired: ["Retired Assets", "Derecognized / disposed items kept for historical reference"],
+    reports: ["Reports", "Generate the Equipment Ledger Card and Property Card for any asset"],
   };
   document.getElementById("viewTitle").textContent = titles[v][0];
   document.getElementById("viewSubtitle").textContent = titles[v][1];
@@ -1400,4 +1468,5 @@ Object.assign(window, {
   exportRegisterCsv, exportRetiredCsv, exportDepreciationDetailCsv,
   handleTbFileUpload,
   printLedgerCard, printPropertyCard, printLedgerCardsBulk, printPropertyCardsBulk,
+  printLedgerCardsBulkReports, printPropertyCardsBulkReports,
 });
