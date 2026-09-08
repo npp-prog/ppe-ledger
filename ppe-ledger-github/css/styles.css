@@ -70,6 +70,22 @@
   .brand h1{ font-size:16px; font-weight:600; margin:0; line-height:1.2; }
   .brand .sub{ font-size:11px; color:var(--ink-faint); margin-top:2px; letter-spacing:.02em; }
 
+  /* ---------- Fund switcher ---------- */
+  .fundswitch{ padding:10px 10px 8px; border-bottom:1px solid var(--line); display:flex; flex-direction:column; gap:2px; }
+  .fundswitch button{
+    text-align:left; padding:7px 9px; border-radius:8px; border:none; background:transparent;
+    color:var(--ink-soft); font-size:12.5px; font-weight:500; cursor:pointer; display:flex;
+    align-items:center; gap:8px; transition:background .12s ease, color .12s ease; width:100%;
+  }
+  .fundswitch button b{
+    font-family:"Roboto Mono",monospace; font-size:10px; min-width:26px; text-align:center;
+    color:var(--ink-faint); font-weight:700; border:1px solid var(--line); border-radius:5px;
+    padding:2px 3px; flex:none; letter-spacing:.02em;
+  }
+  .fundswitch button:hover{ background:var(--line-soft); color:var(--ink); }
+  .fundswitch button.active{ background:var(--accent-soft); color:var(--accent-strong); font-weight:600; }
+  .fundswitch button.active b{ color:var(--accent-strong); border-color:var(--accent-strong); }
+
   nav{ padding:10px; display:flex; flex-direction:column; gap:2px; flex:1; }
   nav button{
     text-align:left; padding:9px 12px; border-radius:8px; border:none; background:transparent;
@@ -208,6 +224,8 @@
     .brand h1,.brand .sub,nav button span.label{ display:none; }
     .brand .seal{ justify-content:center; }
     nav button{ justify-content:center; }
+    .fundswitch button .fundlabel{ display:none; }
+    .fundswitch button{ justify-content:center; }
     .fieldrow,.fieldrow3{ grid-template-columns:1fr; }
   }
 /* ---------- Sign-in screen ---------- */
