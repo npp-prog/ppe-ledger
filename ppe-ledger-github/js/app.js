@@ -79,7 +79,7 @@ const FUND_LABEL = "GENERAL FUND"; // shown on both printed cards; change here i
 
 /* ---------- Generic helpers ---------- */
 const PESO = new Intl.NumberFormat("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-function fmtMoney(n) { n = Number(n) || 0; return (n < 0 ? "-₱" : "₱") + PESO.format(Math.abs(n)); }
+function fmtMoney(n) { n = Number(n) || 0; return (n < 0 ? "-Php " : "Php ") + PESO.format(Math.abs(n)); }
 function fmtNum(n) { return PESO.format(Number(n) || 0); }
 function round2(n) { return Math.round((Number(n) || 0) * 100) / 100; }
 function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
@@ -234,7 +234,7 @@ function computeReconciliation(period) {
     // Trial Balance exports commonly omit a line entirely when its balance is zero, rather than
     // listing it as 0 — so a missing AD line only counts against reconciliation if the register
     // itself shows a nonzero accumulated depreciation for that account (a real, unexplained gap).
-    // A missing AD line paired with ₱0.00 register AD (e.g. an asset that hasn't started
+    // A missing AD line paired with Php 0.00 register AD (e.g. an asset that hasn't started
     // depreciating yet) is not a variance worth flagging.
     const adOk = !accountInfo(code).depreciable || (tbAD != null ? Math.abs(varAD) < 1 : Math.abs(regAD) < 1);
     const ok = tbCost != null && Math.abs(varCost) < 1 && adOk;
@@ -512,8 +512,8 @@ function openAssetModal(existingId) {
         <div class="field"><label>Accountable officer</label><input id="f_officer" value="${esc(a ? a.accountable_officer : "")}"></div>
       </div>
       <div class="fieldrow3">
-        <div class="field"><label>Cost (₱)</label><input type="number" step="0.01" id="f_cost" value="${a ? a.cost : ""}"></div>
-        <div class="field"><label>5% Residual value (₱)</label><input type="number" step="0.01" id="f_residual" value="${a ? a.residual_value : ""}"></div>
+        <div class="field"><label>Cost (Php)</label><input type="number" step="0.01" id="f_cost" value="${a ? a.cost : ""}"></div>
+        <div class="field"><label>5% Residual value (Php)</label><input type="number" step="0.01" id="f_residual" value="${a ? a.residual_value : ""}"></div>
         <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="f_life" value="${a ? a.useful_life_years : ""}"></div>
       </div>
       <div class="field"><label>PAR / DV reference</label><input id="f_remarks" value="${esc(a ? a.remarks : "")}" placeholder="e.g. PAR No. 2026-01-0004"></div>
@@ -647,8 +647,8 @@ function openRevalueModal(id) {
         <dt>Current residual value</dt><dd class="mono">${fmtMoney(a.residual_value)}</dd>
       </div>
       <div class="fieldrow">
-        <div class="field"><label>New market value (₱)</label><input type="number" step="0.01" id="rv_cost" value="${a.cost}"></div>
-        <div class="field"><label>New residual value (₱)</label><input type="number" step="0.01" id="rv_residual" value="${a.residual_value}"></div>
+        <div class="field"><label>New market value (Php)</label><input type="number" step="0.01" id="rv_cost" value="${a.cost}"></div>
+        <div class="field"><label>New residual value (Php)</label><input type="number" step="0.01" id="rv_residual" value="${a.residual_value}"></div>
       </div>
       <div class="fieldrow">
         <div class="field"><label>Effective date</label><input type="date" id="rv_date" value="${new Date().toISOString().slice(0, 10)}"></div>
