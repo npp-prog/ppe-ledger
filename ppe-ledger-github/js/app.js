@@ -157,13 +157,21 @@ const S = {
   cipProjects: new Map(), // id -> CIP project doc (own collection, separate from assets)
   view: "dashboard",
   currentFund: "GF",      // which fund's books are currently in view — set by setFund(), restored from localStorage
+  currentLedger: "ppe",   // "ppe" or "sx" — which ledger module is in view, set by setLedger(), restored from localStorage
   currentUser: null,      // Firebase Auth user, set by initApp()
   registerFilter: { q: "", category: "", status: "active" },
-  reportsFilter: { q: "", category: "", status: "active" },
+  reportsFilter: { q: "", category: "", status: "active", officer: "" },
   cipFilter: { q: "", status: "in_progress" },
   depPeriod: null,   // chosen period for Monthly Depreciation view
   reconPeriod: null, // chosen period for Reconciliation view
   reconDraft: "",    // unsaved Trial Balance text (pasted or uploaded) not yet tied to a saved period
+  // ---- Semi-Expendable Property (own collections, separate from PPE — see the SX section below) ----
+  sxAssets: new Map(),
+  sxTbSnapshots: new Map(),
+  sxRegisterFilter: { q: "", category: "", status: "active", classification: "" },
+  sxReportsFilter: { q: "", category: "", status: "active", officer: "", classification: "" },
+  sxReconPeriod: null,
+  sxReconDraft: "",
 };
 /** Label used for "last edited by" / "posted by" style attribution — the signed-in user's email. */
 function viewerLabel() {
@@ -404,6 +412,14 @@ function initDb() {
       snap => { S.cipProjects.clear(); snap.docs.forEach(d => S.cipProjects.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
       err => console.error(err)
     );
+    db.collection("sx_assets").onSnapshot(
+      snap => { S.sxAssets.clear(); snap.docs.forEach(d => S.sxAssets.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
+      err => console.error(err)
+    );
+    db.collection("sx_tb_snapshots").onSnapshot(
+      snap => { S.sxTbSnapshots.clear(); snap.docs.forEach(d => S.sxTbSnapshots.set(d.id, d.data())); renderAll(); },
+      err => console.error(err)
+    );
   } catch (e) {
     console.error(e);
     setSync(false, "Database unavailable — check your Firebase configuration.");
@@ -510,9 +526,33 @@ function loadingBlock() {
 /* ============================================================
    RENDER: Asset Register
    ============================================================ */
+/** Renders that fully replace a view's innerHTML on every keystroke (the live search boxes in
+ *  Asset Register / CIP / Reports call their render function on each "input" event so filtering
+ *  updates as you type) would otherwise destroy and recreate the focused <input> on every single
+ *  character — the browser has no way to know the new element is "the same" search box, so focus
+ *  (and the cursor position within it) is lost after just one keystroke. captureFocus()/
+ *  restoreFocus() save which element (by id) had focus and its cursor position before the
+ *  innerHTML swap, then restore both right after — call captureFocus() at the top of a render
+ *  function (before building the new HTML) and restoreFocus() with its result at the very end. */
+function captureFocus(containerId) {
+  const active = document.activeElement;
+  const container = document.getElementById(containerId);
+  if (!active || !active.id || !container || !container.contains(active)) return null;
+  return { id: active.id, start: active.selectionStart, end: active.selectionEnd };
+}
+function restoreFocus(saved) {
+  if (!saved) return;
+  const el = document.getElementById(saved.id);
+  if (!el) return;
+  el.focus();
+  if (typeof saved.start === "number" && typeof el.setSelectionRange === "function") {
+    try { el.setSelectionRange(saved.start, saved.end); } catch (e) { /* not a text-selectable input type */ }
+  }
+}
 function renderRegister() {
   const el = document.getElementById("view-register");
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const focus = captureFocus("view-register");
   const f = S.registerFilter;
   const categories = [...new Set(assetsInCurrentFund().map(a => a.account_name))].sort();
   const rows = filteredRegisterRows();
@@ -553,6 +593,7 @@ function renderRegister() {
   document.getElementById("regSearch").addEventListener("input", e => { S.registerFilter.q = e.target.value; renderRegister(); });
   document.getElementById("regCategory").addEventListener("change", e => { S.registerFilter.category = e.target.value; renderRegister(); });
   document.getElementById("regStatus").addEventListener("change", e => { S.registerFilter.status = e.target.value; renderRegister(); });
+  restoreFocus(focus);
 }
 /** All assets belonging to the currently-selected fund (any status). */
 function assetsInCurrentFund() { return [...S.assets.values()].filter(a => (a.fund || "GF") === S.currentFund); }
@@ -563,6 +604,7 @@ function filterAssetRows(f) {
   let rows = assetsInCurrentFund();
   if (f.status !== "all") rows = rows.filter(a => a.status === f.status);
   if (f.category) rows = rows.filter(a => a.account_name === f.category);
+  if (f.officer) rows = rows.filter(a => (a.accountable_officer || "") === f.officer);
   if (f.q) {
     const q = f.q.toLowerCase();
     rows = rows.filter(a => [a.property_id, a.description, a.location, a.accountable_officer, a.asset_type]
@@ -1467,6 +1509,7 @@ function renderCip() {
   const el = document.getElementById("view-cip");
   if (!el) return; // older index.html without the CIP nav tab/container — nothing to render into
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const focus = captureFocus("view-cip");
   const f = S.cipFilter;
   const rows = cipProjectsFiltered(f);
   el.innerHTML = `
@@ -1503,6 +1546,7 @@ function renderCip() {
   `;
   document.getElementById("cipSearch").addEventListener("input", e => { S.cipFilter.q = e.target.value; renderCip(); });
   document.getElementById("cipStatus").addEventListener("change", e => { S.cipFilter.status = e.target.value; renderCip(); });
+  restoreFocus(focus);
 }
 function exportCipCsv() {
   const rows = cipProjectsFiltered(S.cipFilter);
@@ -2220,25 +2264,32 @@ function renderReports() {
   const el = document.getElementById("view-reports");
   if (!el) return; // older index.html without the Reports nav tab/container — nothing to render into
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const focus = captureFocus("view-reports");
   const f = S.reportsFilter;
   const categories = [...new Set(assetsInCurrentFund().map(a => a.account_name))].sort();
+  const officers = [...new Set(assetsInCurrentFund().map(a => a.accountable_officer).filter(Boolean))].sort();
   const rows = filterAssetRows(f);
+  const totalCost = round2(rows.reduce((s, a) => s + (a.cost || 0), 0));
+  const totalCarrying = round2(rows.reduce((s, a) => s + carryingAmount(a), 0));
   el.innerHTML = `
     <div class="panel">
       <div class="panel-head"><div><h3>Equipment Ledger Card &amp; Property Card</h3>
-        <div class="desc">Printable, per-asset reports matching your official paper forms. Pick an asset below for its own reports, or print the whole filtered list at once.</div></div>
+        <div class="desc">Printable, per-asset reports matching your official paper forms. Pick an asset below for its own reports, or print the whole filtered list at once — filter by Accountable Officer to produce an accountability report for a single custodian.</div></div>
       </div>
       <div class="toolbar">
         <input type="text" class="grow" id="repSearch" placeholder="Search description, property ID, location, officer…" value="${esc(f.q)}">
         <select id="repCategory"><option value="">All categories</option>${categories.map(c => `<option ${c === f.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+        <select id="repOfficer"><option value="">All accountable officers</option>${officers.map(o => `<option ${o === f.officer ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>
         <select id="repStatus">
           <option value="active" ${f.status === "active" ? "selected" : ""}>Active</option>
           <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
         </select>
         <span style="flex:1"></span>
+        <button class="btn" onclick="exportReportsCsv()">Download CSV</button>
         <button class="btn" onclick="printLedgerCardsBulkReports()">Print Ledger Cards (${rows.length})</button>
         <button class="btn" onclick="printPropertyCardsBulkReports()">Print Property Cards (${rows.length})</button>
       </div>
+      <div class="subtle" style="padding:2px 14px 10px;font-size:12.5px;">${rows.length} item(s)${f.officer ? ` accountable to <b>${esc(f.officer)}</b>` : ""} — total cost ${fmtMoney(totalCost)}, carrying amount ${fmtMoney(totalCarrying)}</div>
       <div class="panel-body flush"><div class="tablewrap"><table>
         <thead><tr><th>Property ID</th><th>Category</th><th>Description</th><th>Status</th><th style="width:210px;">Reports</th></tr></thead>
         <tbody>${rows.length ? rows.map(a => `
@@ -2258,7 +2309,20 @@ function renderReports() {
   `;
   document.getElementById("repSearch").addEventListener("input", e => { S.reportsFilter.q = e.target.value; renderReports(); });
   document.getElementById("repCategory").addEventListener("change", e => { S.reportsFilter.category = e.target.value; renderReports(); });
+  document.getElementById("repOfficer").addEventListener("change", e => { S.reportsFilter.officer = e.target.value; renderReports(); });
   document.getElementById("repStatus").addEventListener("change", e => { S.reportsFilter.status = e.target.value; renderReports(); });
+  restoreFocus(focus);
+}
+function exportReportsCsv() {
+  const rows = filterAssetRows(S.reportsFilter);
+  const out = [["Fund", "Property ID", "Category", "Description", "Location", "Accountable Officer", "Date Acquired", "Cost", "Residual Value", "Useful Life (yrs)", "Accum. Depr.", "Carrying Amount", "Status"]];
+  rows.forEach(a => out.push([fundLabel(a.fund || "GF"), a.property_id || "", a.account_name || "", a.description || "", a.location || "", a.accountable_officer || "",
+    a.date_acquired || "", (a.cost || 0).toFixed(2), (a.residual_value || 0).toFixed(2), a.useful_life_years || "",
+    a.depreciable ? currentAccumDepr(a).toFixed(2) : "n/a", carryingAmount(a).toFixed(2), a.status || ""]));
+  const csv = out.map(r => r.map(csvField).join(",")).join("\n");
+  const officerPart = S.reportsFilter.officer ? `_${S.reportsFilter.officer.replace(/[^a-zA-Z0-9]+/g, "_")}` : "";
+  browserDownload(`PPE_Accountability_Report_${S.currentFund}${officerPart}_${new Date().toISOString().slice(0, 10)}.csv`, csv, "text/csv;charset=utf-8;");
+  toast("Saved.");
 }
 function printLedgerCardsBulkReports() {
   const rows = filterAssetRows(S.reportsFilter);
@@ -2269,6 +2333,1007 @@ function printPropertyCardsBulkReports() {
   const rows = filterAssetRows(S.reportsFilter);
   if (!rows.length) return toast("No assets match the current filters.");
   openPrintWindow("Property Cards", printCardsHtml("Property Cards", rows.map(propertyCardCardHtml).join("")));
+}
+
+/* ============================================================
+   SEMI-EXPENDABLE PROPERTY (inventory, NOT part of PPE)
+   Tracked in its own Firestore collections (sx_assets, sx_tb_snapshots) and its own sidebar
+   section, switched to via the Ledger switcher (setLedger) above the Fund switcher. No
+   depreciation and no accumulated depreciation at all — the official COA "Semi-Expendable
+   Property Ledger Card" form has no such columns; these items are expensed outright. Every item
+   is classified High Value / Low Value purely from its cost (never hand-edited, so it can't drift
+   out of sync with a corrected cost) and retiring one always requires a reason — see
+   SX_RETIRE_REASONS / openSxRetireModal below.
+   ============================================================ */
+
+/** Semi-expendable UACS account codes — mirrors the PPE catalog's Machinery & Equipment /
+ *  Furniture, Fixtures & Books sub-categories one "ledger" down (10405xxx / 10406xxx instead of
+ *  10705xxx / 10707xxx), since semi-expendable property uses the same sub-type breakdown as PPE,
+ *  just under the semi-expendable major account group. */
+const SX_ACCOUNT_CATALOG = [
+  [10405010, "Semi-Expendable Machinery"],
+  [10405020, "Semi-Expendable Office Equipment"],
+  [10405030, "Semi-Expendable Information and Communication Technology Equipment"],
+  [10405040, "Semi-Expendable Agricultural and Forestry Equipment"],
+  [10405050, "Semi-Expendable Marine and Fishery Equipment"],
+  [10405060, "Semi-Expendable Airport Equipment"],
+  [10405070, "Semi-Expendable Communication Equipment"],
+  [10405080, "Semi-Expendable Construction and Heavy Equipment"],
+  [10405090, "Semi-Expendable Disaster Response and Rescue Equipment"],
+  [10405100, "Semi-Expendable Military, Police and Security Equipment"],
+  [10405110, "Semi-Expendable Medical Equipment"],
+  [10405120, "Semi-Expendable Printing Equipment"],
+  [10405130, "Semi-Expendable Sports Equipment"],
+  [10405140, "Semi-Expendable Technical and Scientific Equipment"],
+  [10405990, "Semi-Expendable Other Machinery and Equipment"],
+  [10406010, "Semi-Expendable Furniture and Fixtures"],
+  [10406020, "Semi-Expendable Books"],
+];
+const SX_ACCOUNT_BY_CODE = {};
+SX_ACCOUNT_CATALOG.forEach(([code, name]) => { SX_ACCOUNT_BY_CODE[code] = { code, name }; });
+function sxAccountInfo(code) {
+  return SX_ACCOUNT_BY_CODE[code] || { code, name: code ? "Account " + code : "— No account assigned —" };
+}
+
+/** Retirement always requires picking one of these — there is no "quick retire" for
+ *  semi-expendable property, unlike the PPE Ledger's one-line confirm(). */
+const SX_RETIRE_REASONS = [
+  "Disposed by sale",
+  "Disposed by destruction / condemnation (IIRUP)",
+  "Transferred out",
+  "Donated out",
+  "Lost / stolen",
+  "Worn out / beyond economical repair",
+  "Returned to supplier",
+  "Other",
+];
+
+const SX_HIGH_VALUE_THRESHOLD = 5000;
+/** High Value if cost is strictly more than Php 5,000; Low Value at Php 5,000 or below — per the
+ *  client's explicit rule. Always computed from cost, never stored/hand-edited, so a later cost
+ *  correction can't leave a stale classification behind. */
+function sxClassificationOf(asset) { return (asset.cost || 0) > SX_HIGH_VALUE_THRESHOLD ? "high" : "low"; }
+function sxClassificationLabel(c) { return c === "high" ? "High Value" : "Low Value"; }
+function sxClassificationPill(c) { return c === "high" ? '<span class="pill warn">High Value</span>' : '<span class="pill neutral">Low Value</span>'; }
+
+function sxAssetsInCurrentFund() { return [...S.sxAssets.values()].filter(a => (a.fund || "GF") === S.currentFund); }
+function sxActiveAssets(fund) { return [...S.sxAssets.values()].filter(a => a.status === "active" && (a.fund || "GF") === fund); }
+/** Filter object shape: { q, category, status, classification, officer }. Shared by the Register
+ *  and Reports views, same pattern as filterAssetRows for the PPE side. */
+function filterSxAssetRows(f) {
+  let rows = sxAssetsInCurrentFund();
+  if (f.status !== "all") rows = rows.filter(a => a.status === f.status);
+  if (f.category) rows = rows.filter(a => a.account_name === f.category);
+  if (f.classification) rows = rows.filter(a => sxClassificationOf(a) === f.classification);
+  if (f.officer) rows = rows.filter(a => (a.accountable_officer || "") === f.officer);
+  if (f.q) {
+    const q = f.q.toLowerCase();
+    rows = rows.filter(a => [a.property_id, a.sen, a.description, a.location, a.accountable_officer, a.article_type]
+      .some(v => v && String(v).toLowerCase().includes(q)));
+  }
+  rows.sort((a, b) => (a.account_name || "").localeCompare(b.account_name || "") || (a.property_id || "").localeCompare(b.property_id || ""));
+  return rows;
+}
+function filteredSxRegisterRows() { return filterSxAssetRows(S.sxRegisterFilter); }
+
+/** Net effect of an asset's ledger history on its cost. `prior_adjustment` is a known write-down
+ *  already on record before this system existed (the semi-expendable analogue of the PPE Ledger's
+ *  "baseline accumulated depreciation" — a starting point entered once, not reconstructed
+ *  event-by-event). Later "adjustment" entries are signed (+/-); "impairment" entries are always a
+ *  reduction; "repair" entries don't change cost at all, they just log repair history. */
+function sxAdjustedCost(asset) {
+  const entries = asset.ledger_entries || [];
+  let total = (asset.cost || 0) - (asset.prior_adjustment || 0);
+  entries.forEach(e => {
+    if (e.type === "adjustment") total += Number(e.amount) || 0;
+    else if (e.type === "impairment") total -= Math.abs(Number(e.amount) || 0);
+  });
+  return round2(total);
+}
+function sxAccumulatedImpairment(asset) {
+  return round2((asset.ledger_entries || []).filter(e => e.type === "impairment").reduce((s, e) => s + Math.abs(Number(e.amount) || 0), 0));
+}
+
+/** One time-ordered event list per asset — acquisition (carrying any known prior_adjustment
+ *  write-down forward), each ledger entry (adjustment/impairment/repair), each transfer, and
+ *  retirement — with a running Adjusted Cost. Shared by both printed cards, the same
+ *  one-source-of-truth pattern as the PPE Ledger's assetEventTimeline. */
+function sxAssetTimeline(asset) {
+  const rows = [];
+  let running = round2((asset.cost || 0) - (asset.prior_adjustment || 0));
+  let impairmentRunning = 0;
+  rows.push({
+    kind: "acquire", date: asset.date_acquired || "", reference: asset.sen || "",
+    qty: asset.qty || 1, unitCost: asset.unit_cost || asset.cost || 0, totalCost: asset.cost || 0,
+    adjustmentAmt: asset.prior_adjustment ? -asset.prior_adjustment : 0,
+    impairmentAmt: 0, adjustedCost: running, note: "Receipt",
+  });
+  const events = [
+    ...(asset.ledger_entries || []).map(e => ({ ...e, _k: "entry" })),
+    ...(asset.transfers || []).map(t => ({ ...t, _k: "transfer" })),
+  ].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  events.forEach(e => {
+    if (e._k === "entry") {
+      if (e.type === "adjustment") running = round2(running + (Number(e.amount) || 0));
+      else if (e.type === "impairment") { impairmentRunning = round2(impairmentRunning + Math.abs(Number(e.amount) || 0)); running = round2(running - Math.abs(Number(e.amount) || 0)); }
+      rows.push({
+        kind: e.type, date: e.date || "", reference: e.reference || "",
+        qty: null, unitCost: null, totalCost: null,
+        adjustmentAmt: e.type === "adjustment" ? (Number(e.amount) || 0) : 0,
+        impairmentAmt: e.type === "impairment" ? impairmentRunning : "",
+        adjustedCost: running, repairNature: e.type === "repair" ? (e.note || "") : "",
+        repairAmount: e.type === "repair" ? (Number(e.amount) || 0) : null,
+        note: e.note || "",
+      });
+    } else {
+      rows.push({
+        kind: "transfer", date: e.date || "", reference: e.reason || "",
+        adjustedCost: running, newLocation: e.new_location, newOfficer: e.new_accountable_officer,
+        note: `Transferred${e.new_accountable_officer ? " to " + e.new_accountable_officer : ""}`,
+      });
+    }
+  });
+  if (asset.status === "retired") {
+    rows.push({
+      kind: "retire", date: asset.retired_at ? asset.retired_at.slice(0, 10) : "", reference: asset.retire_reference || "",
+      adjustedCost: running, note: asset.retire_reason || "Retired",
+    });
+  }
+  return rows;
+}
+
+/* ---------- SX Reconciliation engine (cost-only — no accumulated-depreciation side) ---------- */
+function sxTbSnapshotsForFund(fund) { return [...S.sxTbSnapshots.values()].filter(d => (d.fund || "GF") === fund); }
+function getSxTbSnapshot(fund, period) { return sxTbSnapshotsForFund(fund).find(d => d.period === period) || null; }
+function distinctSxCostAccounts(fund) {
+  const map = new Map();
+  sxActiveAssets(fund).forEach(a => { if (a.account_code && !map.has(a.account_code)) map.set(a.account_code, a.account_name); });
+  return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([code, name]) => ({ code, name }));
+}
+function registrySxCostFor(code, fund) {
+  return round2(sxActiveAssets(fund).filter(a => a.account_code === code).reduce((s, a) => s + (a.cost || 0), 0));
+}
+function computeSxReconciliation(fund, period) {
+  const tb = getSxTbSnapshot(fund, period);
+  const accounts = tb ? tb.accounts : null;
+  return distinctSxCostAccounts(fund).map(({ code, name }) => {
+    const regCost = registrySxCostFor(code, fund);
+    const tbCost = accounts && accounts[code] ? Number(accounts[code].debit || 0) : null;
+    const varCost = tbCost == null ? null : round2(regCost - tbCost);
+    const ok = tbCost != null && Math.abs(varCost) < 1;
+    return { code, name, regCost, tbCost, varCost, ok, hasTb: !!accounts };
+  });
+}
+
+/* ============================================================
+   RENDER: Semi-Expendable Dashboard
+   ============================================================ */
+function renderSxDashboard() {
+  const el = document.getElementById("view-sxdashboard");
+  if (!el) return; // older index.html without the SX nav tabs/containers — nothing to render into
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const fund = S.currentFund;
+  const active = sxActiveAssets(fund);
+  const totalCost = round2(active.reduce((s, a) => s + (a.cost || 0), 0));
+  const totalAdjusted = round2(active.reduce((s, a) => s + sxAdjustedCost(a), 0));
+  const high = active.filter(a => sxClassificationOf(a) === "high");
+  const low = active.filter(a => sxClassificationOf(a) === "low");
+  const needsAccount = active.filter(a => !a.account_code).length;
+
+  const tbPeriods = sxTbSnapshotsForFund(fund).map(d => d.period).sort(cmpPeriod);
+  const latestTbPeriod = tbPeriods.length ? tbPeriods[tbPeriods.length - 1] : null;
+  const recon = latestTbPeriod ? computeSxReconciliation(fund, latestTbPeriod) : [];
+  const flags = recon.filter(r => r.hasTb && !r.ok);
+  const okCount = recon.filter(r => r.hasTb && r.ok).length;
+
+  const byCat = new Map();
+  active.forEach(a => {
+    const k = a.account_name || "— No account assigned —";
+    if (!byCat.has(k)) byCat.set(k, { name: k, cost: 0, count: 0 });
+    const c = byCat.get(k); c.cost += a.cost || 0; c.count++;
+  });
+  const cats = [...byCat.values()].sort((a, b) => b.cost - a.cost);
+
+  el.innerHTML = `
+    <div class="banner info" style="margin-bottom:14px;">Semi-expendable property is tracked as <b>inventory</b>, separate from capitalized PPE — no depreciation, no accumulated depreciation. Switch back with the ledger switcher above the Fund selector.</div>
+    <div class="cardrow">
+      <div class="card"><div class="label">Total Cost</div><div class="value">${fmtMoney(totalCost)}</div><div class="foot">${active.length} active item(s)</div></div>
+      <div class="card"><div class="label">Adjusted Cost</div><div class="value">${fmtMoney(totalAdjusted)}</div><div class="foot">after impairment/adjustment history</div></div>
+      <div class="card"><div class="label">High Value</div><div class="value">${high.length}</div><div class="foot">${fmtMoney(round2(high.reduce((s, a) => s + (a.cost || 0), 0)))} — over Php 5,000</div></div>
+      <div class="card"><div class="label">Low Value</div><div class="value">${low.length}</div><div class="foot">${fmtMoney(round2(low.reduce((s, a) => s + (a.cost || 0), 0)))} — Php 5,000 or less</div></div>
+      <div class="card"><div class="label">Reconciliation</div><div class="value" style="color:${flags.length ? "var(--bad)" : "var(--good)"}">${latestTbPeriod ? flags.length + " to check" : "—"}</div><div class="foot">${latestTbPeriod ? okCount + " accounts tie out • " + periodShort(latestTbPeriod) : "No Trial Balance loaded yet"}</div></div>
+    </div>
+    ${needsAccount ? `<div class="banner warn" style="margin-bottom:14px;">${needsAccount} item(s) (mostly "found at the station" imports) have no account code assigned yet — <a href="#" onclick="setView('sxregister');return false;">open the Register</a> to complete them.</div>` : ""}
+    ${flags.length ? `
+    <div class="panel">
+      <div class="panel-head"><div><h3>Needs your attention</h3><div class="desc">Accounts where the register doesn't tie to the ${periodShort(latestTbPeriod)} Trial Balance</div></div>
+        <button class="btn" onclick="setView('sxreconciliation')">Open Reconciliation →</button></div>
+      <div class="panel-body"><div class="flag-list">
+        ${flags.map(f => `<div class="flag-item bad"><span class="pill bad">CHECK</span>
+          <div><b>${esc(f.name)}</b> (${f.code}) — register shows ${fmtMoney(f.regCost)}, Trial Balance shows ${fmtMoney(f.tbCost)} — variance ${fmtMoney(f.varCost)}.</div></div>`).join("")}
+      </div></div>
+    </div>` : latestTbPeriod ? `<div class="banner info">All ${okCount} semi-expendable accounts tie to the ${periodShort(latestTbPeriod)} Trial Balance.</div>` :
+    `<div class="banner warn">No Trial Balance entered yet. Open <a href="#" onclick="setView('sxreconciliation');return false;">Reconciliation</a> to paste one in.</div>`}
+    <div class="panel">
+      <div class="panel-head"><div><h3>By category</h3><div class="desc">Active items, current fund</div></div></div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>Category</th><th class="num">Items</th><th class="num">Cost</th></tr></thead>
+        <tbody>${cats.map(c => `<tr><td>${esc(c.name)}</td><td class="num mono">${c.count}</td><td class="num mono">${fmtMoney(c.cost)}</td></tr>`).join("")}</tbody>
+      </table></div></div>
+    </div>
+  `;
+}
+
+/* ============================================================
+   RENDER: Semi-Expendable Register
+   ============================================================ */
+function sxAccountCategoryOptions(selectedCode) {
+  return `<option value="">— Select account —</option>` + SX_ACCOUNT_CATALOG.map(([code, name]) =>
+    `<option value="${code}" ${code === Number(selectedCode) ? "selected" : ""}>${code} — ${esc(name)}</option>`).join("");
+}
+function renderSxRegister() {
+  const el = document.getElementById("view-sxregister");
+  if (!el) return;
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const focus = captureFocus("view-sxregister");
+  const f = S.sxRegisterFilter;
+  const categories = [...new Set(sxAssetsInCurrentFund().map(a => a.account_name).filter(Boolean))].sort();
+  const rows = filteredSxRegisterRows();
+  el.innerHTML = `
+    <div class="panel">
+      <div class="toolbar">
+        <input type="text" class="grow" id="sxregSearch" placeholder="Search description, property/inventory no., SEN, location, officer…" value="${esc(f.q)}">
+        <select id="sxregCategory"><option value="">All categories</option>${categories.map(c => `<option ${c === f.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+        <select id="sxregClass"><option value="">High &amp; Low Value</option><option value="high" ${f.classification === "high" ? "selected" : ""}>High Value</option><option value="low" ${f.classification === "low" ? "selected" : ""}>Low Value</option></select>
+        <select id="sxregStatus">
+          <option value="active" ${f.status === "active" ? "selected" : ""}>Active</option>
+          <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
+        </select>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="exportSxRegisterCsv()">Download CSV</button>
+        <button class="btn" onclick="printSxLedgerCardsBulk()">Print Ledger Cards</button>
+        <button class="btn" onclick="printSxPropertyCardsBulk()">Print Property Cards</button>
+        <button class="btn" onclick="openSxBulkAddModal()">Bulk add (paste)</button>
+        <button class="btn primary" onclick="openSxAssetModal()">+ Add item</button>
+      </div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>Property/Inventory No.</th><th>Category</th><th>Description</th><th>Location</th><th class="num">Cost</th><th>Classification</th><th>Status</th></tr></thead>
+        <tbody>${rows.length ? rows.map(a => `
+          <tr class="clickable" onclick="openSxAssetDetail('${a.id}')">
+            <td class="mono">${esc(a.property_id) || "—"}</td>
+            <td>${esc(a.account_name) || '<span class="subtle">— none —</span>'}</td>
+            <td class="truncate" title="${esc(a.description)}">${esc(a.description) || "—"}</td>
+            <td class="truncate">${esc(a.location) || "—"}</td>
+            <td class="num mono">${fmtMoney(a.cost)}</td>
+            <td>${sxClassificationPill(sxClassificationOf(a))}</td>
+            <td>${a.status === "retired" ? '<span class="pill neutral">Retired</span>' : '<span class="pill good">Active</span>'}</td>
+          </tr>`).join("") : `<tr><td colspan="7"><div class="empty">No semi-expendable items match these filters.</div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>
+  `;
+  document.getElementById("sxregSearch").addEventListener("input", e => { S.sxRegisterFilter.q = e.target.value; renderSxRegister(); });
+  document.getElementById("sxregCategory").addEventListener("change", e => { S.sxRegisterFilter.category = e.target.value; renderSxRegister(); });
+  document.getElementById("sxregClass").addEventListener("change", e => { S.sxRegisterFilter.classification = e.target.value; renderSxRegister(); });
+  document.getElementById("sxregStatus").addEventListener("change", e => { S.sxRegisterFilter.status = e.target.value; renderSxRegister(); });
+  restoreFocus(focus);
+}
+function exportSxRegisterCsv() {
+  const rows = filteredSxRegisterRows();
+  const out = [["Fund", "Property/Inventory No.", "SEN", "Category", "Description", "Article/Type", "Location", "Accountable Officer", "Unit of Measure", "Qty", "Unit Cost", "Cost", "Classification", "Adjusted Cost", "Date Acquired", "Status"]];
+  rows.forEach(a => out.push([fundLabel(a.fund || "GF"), a.property_id || "", a.sen || "", a.account_name || "", a.description || "", a.article_type || "",
+    a.location || "", a.accountable_officer || "", a.unit_of_measure || "", a.qty || "", (a.unit_cost || 0).toFixed(2), (a.cost || 0).toFixed(2),
+    sxClassificationLabel(sxClassificationOf(a)), sxAdjustedCost(a).toFixed(2), a.date_acquired || "", a.status || ""]));
+  const csv = out.map(r => r.map(csvField).join(",")).join("\n");
+  browserDownload(`Semi_Expendable_Register_${S.currentFund}_${new Date().toISOString().slice(0, 10)}.csv`, csv, "text/csv;charset=utf-8;");
+  toast("Saved.");
+}
+
+/* ---------- SX Add/Edit item ---------- */
+function openSxAssetModal(existingId) {
+  const a = existingId ? S.sxAssets.get(existingId) : null;
+  openModal(`
+    <div class="modal-head"><h3>${a ? "Edit semi-expendable item" : "Add semi-expendable item"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="fieldrow">
+        <div class="field"><label>Fund</label><select id="sf_fund">${FUNDS.map(f => `<option value="${f.code}" ${((a && a.fund) || S.currentFund) === f.code ? "selected" : ""}>${f.label}</option>`).join("")}</select></div>
+        <div class="field"><label>Account</label><select id="sf_account">${sxAccountCategoryOptions(a ? a.account_code : "")}</select></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Property/Inventory No.</label><input id="sf_propid" value="${esc(a ? a.property_id : "")}"></div>
+        <div class="field"><label>Semi-Expendable Number (SEN)</label><input id="sf_sen" value="${esc(a ? a.sen : "")}" placeholder="e.g. SPHV-2020-12-0001"></div>
+      </div>
+      <div class="field"><label>Description</label><textarea id="sf_desc" rows="2">${esc(a ? a.description : "")}</textarea></div>
+      <div class="fieldrow">
+        <div class="field"><label>Article/Type</label><input id="sf_article" value="${esc(a ? a.article_type : "")}" placeholder="e.g. COMPUTER SET"></div>
+        <div class="field"><label>Location/Office</label><input id="sf_loc" value="${esc(a ? a.location : "")}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Accountable officer</label><input id="sf_officer" value="${esc(a ? a.accountable_officer : "")}"></div>
+        <div class="field"><label>Unit of measure</label><input id="sf_uom" value="${esc(a ? a.unit_of_measure : "")}" placeholder="e.g. SET, UNIT, PC"></div>
+      </div>
+      <div class="fieldrow3">
+        <div class="field"><label>Qty</label><input type="number" step="1" id="sf_qty" value="${a ? (a.qty || 1) : 1}"></div>
+        <div class="field"><label>Unit cost (Php)</label><input type="number" step="0.01" id="sf_unitcost" value="${a ? (a.unit_cost || 0) : 0}"></div>
+        <div class="field"><label>Total cost (Php)</label><input type="number" step="0.01" id="sf_cost" value="${a ? (a.cost || 0) : 0}"></div>
+      </div>
+      <p class="subtle" style="font-size:11.5px;margin:-6px 0 10px;">Total cost is what decides High Value (over Php 5,000) vs Low Value (Php 5,000 or below) — enter it directly if it doesn't come out to exactly qty × unit cost in your records. Classification: <span id="sf_classpreview">${sxClassificationPill(sxClassificationOf(a || { cost: 0 }))}</span></p>
+      <div class="fieldrow">
+        <div class="field"><label>Date acquired</label><input type="date" id="sf_date" value="${a ? (a.date_acquired || "") : ""}"></div>
+        <div class="field"><label>How acquired</label><select id="sf_acqtype">${ACQUISITION_TYPES.map(t => `<option value="${t.code}" ${(a ? a.acquisition_type : "purchased") === t.code ? "selected" : ""}>${t.label}</option>`).join("")}</select></div>
+      </div>
+      <div class="field" id="sf_acqsrc_wrap" style="${!a || !a.acquisition_type || a.acquisition_type === "purchased" ? "display:none;" : ""}">
+        <label id="sf_acqsrc_label">Source / donor</label><input id="sf_acqsrc" value="${esc(a ? a.acquisition_source : "")}">
+      </div>
+      <div class="field">
+        <label>Prior write-down / adjustment already recorded (Php)<br><span class="subtle" style="font-size:11px;font-weight:400;">Only for a pre-existing item whose Adjusted Cost is already below its original cost from before this system — e.g. an item already written down close to zero. Leave 0 for anything with no such history.</span></label>
+        <input type="number" step="0.01" id="sf_prioradj" value="${a ? (a.prior_adjustment || 0) : 0}">
+      </div>
+      <div class="field"><label>Remarks</label><input id="sf_remarks" value="${esc(a ? a.remarks : "")}"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" id="sf_saveBtn" onclick="saveSxAsset(${a ? `'${a.id}'` : "null"})">${a ? "Save changes" : "Add item"}</button>
+    </div>
+  `);
+  const updatePreview = () => {
+    const cost = Number(document.getElementById("sf_cost").value) || 0;
+    document.getElementById("sf_classpreview").innerHTML = sxClassificationPill(sxClassificationOf({ cost }));
+  };
+  document.getElementById("sf_cost").addEventListener("input", updatePreview);
+  const qtyEl = document.getElementById("sf_qty"), unitEl = document.getElementById("sf_unitcost"), costEl = document.getElementById("sf_cost");
+  const autoCost = () => { const q = Number(qtyEl.value) || 0, u = Number(unitEl.value) || 0; if (q && u) { costEl.value = round2(q * u); updatePreview(); } };
+  qtyEl.addEventListener("input", autoCost); unitEl.addEventListener("input", autoCost);
+  document.getElementById("sf_acqtype").addEventListener("change", e => {
+    const wrap = document.getElementById("sf_acqsrc_wrap");
+    wrap.style.display = e.target.value === "purchased" ? "none" : "";
+    document.getElementById("sf_acqsrc_label").textContent = e.target.value === "donated" ? "Donor" : "Found at / reference";
+  });
+}
+async function saveSxAsset(existingId) {
+  if (!S.db) return toast("No shared database in this view.");
+  const accountVal = document.getElementById("sf_account").value;
+  const rec = {
+    fund: document.getElementById("sf_fund").value,
+    account_code: accountVal ? Number(accountVal) : null,
+    account_name: accountVal ? sxAccountInfo(Number(accountVal)).name : "",
+    property_id: document.getElementById("sf_propid").value.trim(),
+    sen: document.getElementById("sf_sen").value.trim(),
+    description: document.getElementById("sf_desc").value.trim(),
+    article_type: document.getElementById("sf_article").value.trim(),
+    location: document.getElementById("sf_loc").value.trim(),
+    accountable_officer: document.getElementById("sf_officer").value.trim(),
+    unit_of_measure: document.getElementById("sf_uom").value.trim(),
+    qty: Number(document.getElementById("sf_qty").value) || 1,
+    unit_cost: round2(Number(document.getElementById("sf_unitcost").value) || 0),
+    cost: round2(Number(document.getElementById("sf_cost").value) || 0),
+    date_acquired: document.getElementById("sf_date").value || "",
+    acquisition_type: document.getElementById("sf_acqtype").value,
+    acquisition_source: document.getElementById("sf_acqsrc").value.trim(),
+    prior_adjustment: round2(Number(document.getElementById("sf_prioradj").value) || 0),
+    remarks: document.getElementById("sf_remarks").value.trim(),
+    updated_by: viewerLabel(),
+  };
+  if (!rec.description) return toast("Enter a description.");
+  try {
+    if (existingId) {
+      await S.db.collection("sx_assets").doc(existingId).update(rec);
+      toast("Saved.");
+    } else {
+      await S.db.collection("sx_assets").add({ ...rec, status: "active", ledger_entries: [], transfers: [], created_by: viewerLabel(), created_at: new Date().toISOString() });
+      toast("Item added.");
+    }
+    closeModal();
+  } catch (e) { console.error(e); toast("Couldn't save — check your connection and try again."); }
+}
+
+/* ---------- SX Asset detail ---------- */
+function openSxAssetDetail(id) {
+  const a = S.sxAssets.get(id);
+  if (!a) return;
+  const adjusted = sxAdjustedCost(a);
+  const impairment = sxAccumulatedImpairment(a);
+  openModal(`
+    <div class="modal-head"><h3>${esc(a.property_id) || "Item"} — ${esc(a.account_name) || "No account"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="margin-top:0;">${esc(a.description) || "<span class=subtle>No description</span>"}</p>
+      <div class="kv">
+        <dt>Fund</dt><dd>${esc(fundLabel(a.fund || "GF"))}</dd>
+        <dt>Semi-Expendable No.</dt><dd class="mono">${esc(a.sen) || "—"}</dd>
+        <dt>Article/Type</dt><dd>${esc(a.article_type) || "—"}</dd>
+        <dt>Location</dt><dd>${esc(a.location) || "—"}</dd>
+        <dt>Accountable officer</dt><dd>${esc(a.accountable_officer) || "—"}</dd>
+        <dt>Unit of measure / Qty</dt><dd>${esc(a.unit_of_measure) || "—"} ${a.qty ? "× " + a.qty : ""}</dd>
+        <dt>Date acquired</dt><dd>${fmtDate(a.date_acquired)}</dd>
+        <dt>How acquired</dt><dd>${esc(acquisitionTypeLabel(a.acquisition_type))}${a.acquisition_type && a.acquisition_type !== "purchased" && a.acquisition_source ? " — " + esc(a.acquisition_source) : ""}</dd>
+        <dt>Classification</dt><dd>${sxClassificationPill(sxClassificationOf(a))}</dd>
+        <dt>Status</dt><dd>${a.status === "retired" ? '<span class="pill neutral">Retired</span>' : '<span class="pill good">Active</span>'}</dd>
+      </div>
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <div class="kv">
+        <dt>Cost</dt><dd class="mono">${fmtMoney(a.cost)}</dd>
+        <dt>Prior write-down/adjustment</dt><dd class="mono">${fmtMoney(a.prior_adjustment)}</dd>
+        <dt>Accumulated impairment losses</dt><dd class="mono">${fmtMoney(impairment)}</dd>
+        <dt>Adjusted cost</dt><dd class="mono">${fmtMoney(adjusted)}</dd>
+      </div>
+      ${a.status === "retired" ? `
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <div class="kv">
+        <dt>Retired</dt><dd>${fmtDate(a.retired_at ? a.retired_at.slice(0, 10) : "")}</dd>
+        <dt>Reason</dt><dd>${esc(a.retire_reason) || "—"}</dd>
+        <dt>Detail</dt><dd>${esc(a.retire_detail) || "—"}</dd>
+        <dt>Reference</dt><dd>${esc(a.retire_reference) || "—"}</dd>
+      </div>` : ""}
+      ${(a.ledger_entries && a.ledger_entries.length) ? `
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <label style="margin-bottom:6px;">Ledger history</label>
+      <div class="kv" style="font-size:12.5px;grid-template-columns:110px 1fr;">
+        ${a.ledger_entries.slice().reverse().map(e => `<dt class="mono">${fmtDate(e.date)}</dt><dd>${e.type === "adjustment" ? "Adjustment " + fmtMoney(e.amount) : e.type === "impairment" ? "Impairment loss " + fmtMoney(Math.abs(e.amount)) : "Repair — " + fmtMoney(e.amount)}${e.note ? ": " + esc(e.note) : ""} <span class="subtle">(${esc(e.by || "")})</span></dd>`).join("")}
+      </div>` : ""}
+      ${a.remarks ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">Remarks: ${esc(a.remarks)}</p>` : ""}
+    </div>
+    <div class="modal-foot">
+      ${a.status !== "retired" ? `<button class="btn danger" style="margin-right:auto" onclick="openSxRetireModal('${a.id}')">Retire</button>` : ""}
+      <button class="btn" onclick="printSxLedgerCard('${a.id}')">Ledger Card</button>
+      <button class="btn" onclick="printSxPropertyCard('${a.id}')">Property Card</button>
+      ${a.status !== "retired" ? `<button class="btn" onclick="openSxTransferModal('${a.id}')">Transfer</button>
+      <button class="btn" onclick="openSxLedgerEntryModal('${a.id}')">Add ledger entry</button>` : ""}
+      <button class="btn" onclick="openSxAssetModal('${a.id}')">Edit</button>
+      <button class="btn ghost" onclick="closeModal()">Close</button>
+    </div>
+  `);
+}
+
+/* ---------- SX Retire (always requires a reason) ---------- */
+function openSxRetireModal(id) {
+  const a = S.sxAssets.get(id);
+  if (!a) return;
+  openModal(`
+    <div class="modal-head"><h3>Retire item</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="margin-top:0;">${esc(a.property_id) || esc(a.description)}</p>
+      <p class="subtle" style="font-size:12.5px;">A reason is required — semi-expendable property retirement always needs one, unlike a quick PPE retire.</p>
+      <div class="field"><label>Reason</label><select id="sr_reason"><option value="">— Select a reason —</option>${SX_RETIRE_REASONS.map(r => `<option>${esc(r)}</option>`).join("")}</select></div>
+      <div class="field"><label>Detail</label><textarea id="sr_detail" rows="2" placeholder="Explain what happened, in your own words"></textarea></div>
+      <div class="fieldrow">
+        <div class="field"><label>Reference / disposal document no.</label><input id="sr_ref" placeholder="e.g. IIRUP No., DR No."></div>
+        <div class="field"><label>Date</label><input type="date" id="sr_date" value="${new Date().toISOString().slice(0, 10)}"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="submitSxRetire('${a.id}')">Retire item</button>
+    </div>
+  `);
+}
+async function submitSxRetire(id) {
+  if (!S.db) return toast("No shared database in this view.");
+  const reason = document.getElementById("sr_reason").value;
+  const detail = document.getElementById("sr_detail").value.trim();
+  if (!reason) return toast("Select a reason.");
+  if (!detail) return toast("Enter a detail explaining what happened.");
+  const ref = document.getElementById("sr_ref").value.trim();
+  const date = document.getElementById("sr_date").value || new Date().toISOString().slice(0, 10);
+  await S.db.collection("sx_assets").doc(id).update({
+    status: "retired", retired_at: date + "T00:00:00.000Z", retired_by: viewerLabel(),
+    retire_reason: reason, retire_detail: detail, retire_reference: ref,
+  });
+  toast("Item retired.");
+  closeModal();
+}
+
+/* ---------- SX Ledger entry (adjustment / impairment / repair) ---------- */
+function openSxLedgerEntryModal(assetId) {
+  const a = S.sxAssets.get(assetId);
+  if (!a) return;
+  openModal(`
+    <div class="modal-head"><h3>Add ledger entry</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="margin-top:0;">${esc(a.property_id) || esc(a.description)}</p>
+      <div class="field"><label>Entry type</label><select id="le_type">
+        <option value="adjustment">Adjustment (write-up or write-down)</option>
+        <option value="impairment">Impairment loss</option>
+        <option value="repair">Repair</option>
+      </select></div>
+      <div class="fieldrow">
+        <div class="field"><label>Date</label><input type="date" id="le_date" value="${new Date().toISOString().slice(0, 10)}"></div>
+        <div class="field"><label>Reference</label><input id="le_ref"></div>
+      </div>
+      <div class="field"><label id="le_amount_label">Adjustment amount (Php) — negative writes cost down</label><input type="number" step="0.01" id="le_amount" value="0"></div>
+      <div class="field"><label id="le_note_label">Note</label><input id="le_note"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="saveSxLedgerEntry('${a.id}')">Add entry</button>
+    </div>
+  `);
+  document.getElementById("le_type").addEventListener("change", e => {
+    const t = e.target.value;
+    document.getElementById("le_amount_label").textContent = t === "adjustment" ? "Adjustment amount (Php) — negative writes cost down" : t === "impairment" ? "Impairment loss amount (Php)" : "Repair amount (Php)";
+    document.getElementById("le_note_label").textContent = t === "repair" ? "Nature of repair" : "Note";
+  });
+}
+async function saveSxLedgerEntry(assetId) {
+  if (!S.db) return toast("No shared database in this view.");
+  const a = S.sxAssets.get(assetId);
+  if (!a) return;
+  const entry = {
+    type: document.getElementById("le_type").value,
+    date: document.getElementById("le_date").value || new Date().toISOString().slice(0, 10),
+    reference: document.getElementById("le_ref").value.trim(),
+    amount: round2(Number(document.getElementById("le_amount").value) || 0),
+    note: document.getElementById("le_note").value.trim(),
+    by: viewerLabel(), at: new Date().toISOString(),
+  };
+  const entries = [...(a.ledger_entries || []), entry];
+  await S.db.collection("sx_assets").doc(assetId).update({ ledger_entries: entries, updated_by: viewerLabel() });
+  toast("Entry added.");
+  openSxAssetDetail(assetId);
+}
+
+/* ---------- SX Transfer (location / accountable officer) ---------- */
+function openSxTransferModal(id) {
+  const a = S.sxAssets.get(id);
+  if (!a) return;
+  openModal(`
+    <div class="modal-head"><h3>Transfer item</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="margin-top:0;">${esc(a.account_name)} ${a.property_id ? "— " + esc(a.property_id) : ""}</p>
+      <div class="kv" style="margin-bottom:14px;">
+        <dt>Current location</dt><dd>${esc(a.location) || "—"}</dd>
+        <dt>Current accountable officer</dt><dd>${esc(a.accountable_officer) || "—"}</dd>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>New location/office</label><input id="str_location" value="${esc(a.location)}"></div>
+        <div class="field"><label>New accountable officer</label><input id="str_officer" value="${esc(a.accountable_officer)}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Effective date</label><input type="date" id="str_date" value="${new Date().toISOString().slice(0, 10)}"></div>
+        <div class="field"><label>Reason/reference</label><input id="str_reason"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="transferSxAsset('${a.id}')">Save transfer</button>
+    </div>
+  `);
+}
+async function transferSxAsset(id) {
+  if (!S.db) return toast("No shared database in this view.");
+  const a = S.sxAssets.get(id);
+  if (!a) return;
+  const newLocation = document.getElementById("str_location").value.trim();
+  const newOfficer = document.getElementById("str_officer").value.trim();
+  if (newLocation === (a.location || "") && newOfficer === (a.accountable_officer || "")) return toast("No change to save.");
+  const entry = {
+    date: document.getElementById("str_date").value || new Date().toISOString().slice(0, 10),
+    old_location: a.location || "", new_location: newLocation || a.location || "",
+    old_accountable_officer: a.accountable_officer || "", new_accountable_officer: newOfficer || a.accountable_officer || "",
+    reason: document.getElementById("str_reason").value.trim(), by: viewerLabel(),
+  };
+  const transfers = [...(a.transfers || []), entry];
+  await S.db.collection("sx_assets").doc(id).update({
+    location: entry.new_location, accountable_officer: entry.new_accountable_officer, transfers, updated_by: viewerLabel(),
+  });
+  toast("Transfer recorded.");
+  closeModal();
+}
+
+/* ---------- SX Bulk add (paste or CSV upload) ----------
+   Columns: account_code, property_id, sen, description, article_type, location,
+   accountable_officer, unit_of_measure, qty, unit_cost, cost, date_acquired, remarks,
+   prior_adjustment (optional 14th column — mirrors the PPE Ledger's optional baseline-AD column). */
+function openSxBulkAddModal() {
+  openModal(`
+    <div class="modal-head"><h3>Bulk add semi-expendable items</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p class="subtle">These will be added to <b>${esc(fundLabel(S.currentFund))}</b> — switch funds in the sidebar first if that's not right.</p>
+      <p class="subtle">Paste rows, or upload a CSV — one item per line, columns in this order:</p>
+      <p class="mono subtle" style="font-size:11px;">account_code, property_id, sen, description, article_type, location, accountable_officer, unit_of_measure, qty, unit_cost, cost, date_acquired (YYYY-MM-DD), remarks, prior_adjustment (optional)</p>
+      <p class="subtle" style="font-size:11.5px;">Classification (High/Low Value) is computed automatically from cost — no column for it. Leave account_code blank for an item that still needs one assigned (e.g. a "found at the station" item).</p>
+      <div class="field" style="margin-top:10px;"><label>CSV file</label><input type="file" id="sxBulkFile" accept=".csv,text/csv"></div>
+      <p class="subtle" style="font-size:12px;margin:10px 0 6px;">— or paste directly —</p>
+      <div class="field"><textarea id="sxBulkPaste" rows="7"></textarea></div>
+      <div id="sxBulkPreview" class="subtle" style="font-size:12px;"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="submitSxBulkAdd()">Add all</button>
+    </div>
+  `);
+  const textarea = document.getElementById("sxBulkPaste");
+  const preview = () => {
+    const rows = parseSxBulkRows(textarea.value);
+    document.getElementById("sxBulkPreview").textContent = rows.length ? `${rows.length} item(s) recognized.` : textarea.value.trim() ? "No valid rows recognized yet." : "";
+  };
+  textarea.addEventListener("input", preview);
+  document.getElementById("sxBulkFile").addEventListener("change", e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let text = String(reader.result || "");
+      if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+      textarea.value = text;
+      preview();
+      toast(`Loaded ${file.name}.`);
+    };
+    reader.onerror = () => toast("Couldn't read that file.");
+    reader.readAsText(file);
+  });
+}
+function parseSxBulkRows(text) {
+  return text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(line => {
+    return line.includes("\t") ? line.split("\t").map(c => c.trim()) : parseCsvLine(line);
+  }).filter(cols => cols.length >= 11 && cols[3] && !/^account_code$/i.test(cols[0]));
+}
+async function submitSxBulkAdd() {
+  if (!S.db) return toast("No shared database in this view.");
+  const rows = parseSxBulkRows(document.getElementById("sxBulkPaste").value);
+  if (!rows.length) return toast("No valid rows found.");
+  const fund = S.currentFund;
+  let added = 0;
+  for (const cols of rows) {
+    const [code, propid, sen, desc, article, loc, officer, uom, qty, unitCost, cost, date, remarks, prioradj] = cols;
+    const accountCode = code ? Number(code) : null;
+    await S.db.collection("sx_assets").add({
+      fund, account_code: accountCode, account_name: accountCode ? sxAccountInfo(accountCode).name : "",
+      property_id: propid || "", sen: sen || "", description: desc || "", article_type: article || "",
+      location: loc || "", accountable_officer: officer || "", unit_of_measure: uom || "",
+      qty: Number(qty) || 1, unit_cost: round2(Number(unitCost) || 0), cost: round2(Number(cost) || 0),
+      date_acquired: date || "", remarks: remarks || "", prior_adjustment: round2(Number(prioradj) || 0),
+      acquisition_type: "purchased", acquisition_source: "", status: "active", ledger_entries: [], transfers: [],
+      source_sheet: "Bulk import", created_by: viewerLabel(), created_at: new Date().toISOString(),
+    });
+    added++;
+  }
+  toast(`${added} item(s) added to ${fundLabel(fund)}.`);
+  closeModal();
+}
+
+/* ============================================================
+   RENDER: Semi-Expendable Reconciliation
+   ============================================================ */
+function renderSxReconciliation() {
+  const el = document.getElementById("view-sxreconciliation");
+  if (!el) return;
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const fund = S.currentFund;
+  if (!S.sxReconPeriod) {
+    const tbPeriods = sxTbSnapshotsForFund(fund).map(d => d.period).sort(cmpPeriod);
+    S.sxReconPeriod = tbPeriods.length ? tbPeriods[tbPeriods.length - 1] : BASELINE_PERIOD;
+  }
+  const period = S.sxReconPeriod;
+  const tb = getSxTbSnapshot(fund, period);
+  const rows = computeSxReconciliation(fund, period);
+  const flaggedCount = rows.filter(r => r.hasTb && !r.ok).length;
+  const otherPeriods = sxTbSnapshotsForFund(fund).map(d => d.period).sort(cmpPeriod);
+  el.innerHTML = `
+    <div class="banner info" style="margin-bottom:14px;">This is the <b>${esc(fundLabel(fund))}</b> semi-expendable Trial Balance — cost only (no depreciation side). Each fund keeps its own.</div>
+    <div class="panel">
+      <div class="toolbar">
+        <label style="margin:0;">Period</label>
+        <input type="month" id="sxReconPeriodInput" value="${period}">
+        ${otherPeriods.length ? `<select id="sxReconQuick"><option value="">Previously entered…</option>${otherPeriods.map(p => `<option value="${p}" ${p === period ? "selected" : ""}>${periodLabel(p)}</option>`).join("")}</select>` : ""}
+        <span style="flex:1"></span>
+        ${tb ? `<span class="subtle" style="font-size:12px;">Entered ${tb.enteredBy ? "by " + esc(tb.enteredBy) + " " : ""}${tb.enteredAt ? new Date(tb.enteredAt).toLocaleDateString() : ""}</span>` : ""}
+      </div>
+      <div class="panel-body">
+        <p class="subtle" style="margin-top:0;">Paste your Trial Balance export for this period below: <span class="mono">Account Code, Account Name, Debit, Credit</span> (tab or comma separated). Only semi-expendable cost accounts are used.</p>
+        <div class="fieldrow" style="align-items:flex-end;margin-bottom:10px;">
+          <div class="field" style="flex:1;"><label>Or upload from Excel (.xlsx / .xls / .csv)</label><input type="file" id="sxTbFile" accept=".xlsx,.xls,.csv"></div>
+        </div>
+        <textarea id="sxTbPaste" rows="6" placeholder="10405020&#9;Semi-Expendable Office Equipment&#9;350000.00&#9;0">${tb ? Object.entries(tb.accounts).map(([code, v]) => `${code}\t${v.name}\t${v.debit}\t${v.credit}`).join("\n") : (S.sxReconDraft || "")}</textarea>
+        <div style="margin-top:10px;"><button class="btn primary" onclick="saveSxTbSnapshot()">Save &amp; compare</button></div>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>Variance — ${periodLabel(period)}</h3><div class="desc">${tb ? (flaggedCount ? flaggedCount + " account(s) need a look" : "Everything ties out") : "Paste a Trial Balance above to compare"}</div></div>
+        ${tb ? `<button class="btn" onclick="exportSxReconCsv('${period}')">Export CSV</button>` : ""}
+      </div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>Account</th><th class="num">Cost — Register</th><th class="num">Cost — TB</th><th class="num">Variance</th><th>Status</th></tr></thead>
+        <tbody>${rows.map(r => `
+          <tr>
+            <td class="mono">${r.code}<br><span style="font-family:'Public Sans'">${esc(r.name)}</span></td>
+            <td class="num mono">${fmtMoney(r.regCost)}</td>
+            <td class="num mono">${r.tbCost == null ? '<span class="subtle">—</span>' : fmtMoney(r.tbCost)}</td>
+            <td class="num mono">${r.varCost == null ? "—" : fmtMoney(r.varCost)}</td>
+            <td>${!r.hasTb ? '<span class="pill neutral">No TB</span>' : r.ok ? '<span class="pill good">OK</span>' : '<span class="pill bad">Check</span>'}</td>
+          </tr>`).join("")}</tbody>
+      </table></div></div>
+    </div>
+  `;
+  document.getElementById("sxReconPeriodInput").addEventListener("change", e => { if (e.target.value) { S.sxReconPeriod = e.target.value; renderSxReconciliation(); } });
+  const q = document.getElementById("sxReconQuick");
+  if (q) q.addEventListener("change", e => { if (e.target.value) { S.sxReconPeriod = e.target.value; renderSxReconciliation(); } });
+  document.getElementById("sxTbFile").addEventListener("change", e => handleSxTbFileUpload(e.target));
+  document.getElementById("sxTbPaste").addEventListener("input", e => { S.sxReconDraft = e.target.value; });
+}
+async function saveSxTbSnapshot() {
+  if (!S.db) return toast("No shared database in this view.");
+  const fund = S.currentFund;
+  const period = document.getElementById("sxReconPeriodInput").value || S.sxReconPeriod;
+  const text = document.getElementById("sxTbPaste").value;
+  const accounts = parseTbLines(text);
+  if (!Object.keys(accounts).length) return toast("Couldn't find any valid rows.");
+  await S.db.collection("sx_tb_snapshots").doc(fundDocId(fund, period)).set({
+    period, fund, accounts, source: "Pasted in app", enteredBy: viewerLabel(), enteredAt: new Date().toISOString(),
+  });
+  S.sxReconPeriod = period;
+  S.sxReconDraft = "";
+  toast("Trial Balance saved — comparing now (" + fundLabel(fund) + ").");
+}
+function handleSxTbFileUpload(inputEl) {
+  const file = inputEl.files && inputEl.files[0];
+  if (!file) return;
+  if (typeof XLSX === "undefined") { toast("Couldn't load the Excel reader — check your internet connection and try again."); return; }
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const wb = XLSX.read(e.target.result, { type: "array" });
+      const sheet = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: "" });
+      const lines = rows.map(r => (r || []).slice(0, 4).map(v => (v == null ? "" : String(v).trim())))
+        .filter(r => r.some(v => v !== "") && /\d/.test(r[0] || "")).map(r => r.join("\t"));
+      if (!lines.length) { toast("Couldn't find any account rows in that file."); return; }
+      S.sxReconDraft = lines.join("\n");
+      document.getElementById("sxTbPaste").value = S.sxReconDraft;
+      toast(`Loaded ${lines.length} row(s) from "${file.name}" — review below, then Save & compare.`);
+    } catch (err) { console.error(err); toast("Couldn't read that file — make sure it's a Trial Balance export (.xlsx, .xls, or .csv)."); }
+    finally { inputEl.value = ""; }
+  };
+  reader.onerror = () => toast("Couldn't read that file.");
+  reader.readAsArrayBuffer(file);
+}
+function exportSxReconCsv(period) {
+  const fund = S.currentFund;
+  const rows = computeSxReconciliation(fund, period);
+  const out = [["Account Code", "Account Name", "Cost (Register)", "Cost (TB)", "Variance", "Status"]];
+  rows.forEach(r => out.push([r.code, r.name, r.regCost.toFixed(2), r.tbCost == null ? "" : r.tbCost.toFixed(2), r.varCost == null ? "" : r.varCost.toFixed(2), r.hasTb ? (r.ok ? "OK" : "CHECK") : "NO TB"]));
+  const csv = out.map(r => r.map(csvField).join(",")).join("\n");
+  browserDownload(`Semi_Expendable_Reconciliation_${fund}_${period}.csv`, csv, "text/csv;charset=utf-8;");
+  toast("Saved.");
+}
+
+/* ============================================================
+   RENDER: Semi-Expendable Retired Items
+   ============================================================ */
+function renderSxRetired() {
+  const el = document.getElementById("view-sxretired");
+  if (!el) return;
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const rows = sxAssetsInCurrentFund().filter(a => a.status === "retired").sort((a, b) => (a.account_name || "").localeCompare(b.account_name || ""));
+  el.innerHTML = `
+    <div class="panel">
+      <div class="panel-head"><div><h3>Retired semi-expendable items</h3><div class="desc">${rows.length} item(s) — kept for history</div></div>
+        <button class="btn" onclick="exportSxRetiredCsv()">Download CSV</button>
+      </div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>Property/Inventory No.</th><th>Category</th><th>Description</th><th class="num">Cost</th><th>Reason</th><th>Retired</th></tr></thead>
+        <tbody>${rows.length ? rows.map(a => `
+          <tr class="clickable" onclick="openSxAssetDetail('${a.id}')">
+            <td class="mono">${esc(a.property_id) || "—"}</td>
+            <td>${esc(a.account_name) || "—"}</td>
+            <td class="truncate" title="${esc(a.description)}">${esc(a.description) || "—"}</td>
+            <td class="num mono">${fmtMoney(a.cost)}</td>
+            <td class="truncate" title="${esc(a.retire_detail)}">${esc(a.retire_reason) || "—"}</td>
+            <td class="mono">${fmtDate(a.retired_at ? a.retired_at.slice(0, 10) : "")}</td>
+          </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No retired items.</div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>
+  `;
+}
+function exportSxRetiredCsv() {
+  const rows = sxAssetsInCurrentFund().filter(a => a.status === "retired").sort((a, b) => (a.account_name || "").localeCompare(b.account_name || ""));
+  const out = [["Fund", "Property/Inventory No.", "Category", "Description", "Cost", "Reason", "Detail", "Reference", "Retired Date"]];
+  rows.forEach(a => out.push([fundLabel(a.fund || "GF"), a.property_id || "", a.account_name || "", a.description || "", (a.cost || 0).toFixed(2),
+    a.retire_reason || "", a.retire_detail || "", a.retire_reference || "", a.retired_at ? a.retired_at.slice(0, 10) : ""]));
+  const csv = out.map(r => r.map(csvField).join(",")).join("\n");
+  browserDownload(`Semi_Expendable_Retired_${S.currentFund}_${new Date().toISOString().slice(0, 10)}.csv`, csv, "text/csv;charset=utf-8;");
+  toast("Saved.");
+}
+
+/* ============================================================
+   RENDER: Semi-Expendable Reports (Ledger Card & Property Card)
+   ============================================================ */
+function renderSxReports() {
+  const el = document.getElementById("view-sxreports");
+  if (!el) return;
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const focus = captureFocus("view-sxreports");
+  const f = S.sxReportsFilter;
+  const categories = [...new Set(sxAssetsInCurrentFund().map(a => a.account_name).filter(Boolean))].sort();
+  const officers = [...new Set(sxAssetsInCurrentFund().map(a => a.accountable_officer).filter(Boolean))].sort();
+  const rows = filterSxAssetRows(f);
+  const totalCost = round2(rows.reduce((s, a) => s + (a.cost || 0), 0));
+  const totalAdjusted = round2(rows.reduce((s, a) => s + sxAdjustedCost(a), 0));
+  el.innerHTML = `
+    <div class="panel">
+      <div class="panel-head"><div><h3>Semi-Expendable Property Ledger Card &amp; Property Card</h3>
+        <div class="desc">Printable reports matching your official paper forms. Pick an item below for its own reports, or print the whole filtered list at once.</div></div>
+      </div>
+      <div class="toolbar">
+        <input type="text" class="grow" id="sxrepSearch" placeholder="Search description, property no., location, officer…" value="${esc(f.q)}">
+        <select id="sxrepCategory"><option value="">All categories</option>${categories.map(c => `<option ${c === f.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+        <select id="sxrepClass"><option value="">High &amp; Low Value</option><option value="high" ${f.classification === "high" ? "selected" : ""}>High Value</option><option value="low" ${f.classification === "low" ? "selected" : ""}>Low Value</option></select>
+        <select id="sxrepOfficer"><option value="">All accountable officers</option>${officers.map(o => `<option ${o === f.officer ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>
+        <select id="sxrepStatus">
+          <option value="active" ${f.status === "active" ? "selected" : ""}>Active</option>
+          <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
+        </select>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="exportSxReportsCsv()">Download CSV</button>
+        <button class="btn" onclick="printSxLedgerCardsBulkReports()">Print Ledger Cards (${rows.length})</button>
+        <button class="btn" onclick="printSxPropertyCardsBulkReports()">Print Property Cards (${rows.length})</button>
+      </div>
+      <div class="subtle" style="padding:2px 14px 10px;font-size:12.5px;">${rows.length} item(s)${f.officer ? ` accountable to <b>${esc(f.officer)}</b>` : ""} — total cost ${fmtMoney(totalCost)}, adjusted cost ${fmtMoney(totalAdjusted)}</div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>Property/Inventory No.</th><th>Category</th><th>Description</th><th>Classification</th><th>Status</th><th style="width:210px;">Reports</th></tr></thead>
+        <tbody>${rows.length ? rows.map(a => `
+          <tr>
+            <td class="mono">${esc(a.property_id) || "—"}</td>
+            <td>${esc(a.account_name) || "—"}</td>
+            <td class="truncate" title="${esc(a.description)}">${esc(a.description) || "—"}</td>
+            <td>${sxClassificationPill(sxClassificationOf(a))}</td>
+            <td>${a.status === "retired" ? '<span class="pill neutral">Retired</span>' : '<span class="pill good">Active</span>'}</td>
+            <td><button class="btn" style="margin-right:6px;" onclick="printSxLedgerCard('${a.id}')">Ledger Card</button><button class="btn" onclick="printSxPropertyCard('${a.id}')">Property Card</button></td>
+          </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No items match these filters.</div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>
+  `;
+  document.getElementById("sxrepSearch").addEventListener("input", e => { S.sxReportsFilter.q = e.target.value; renderSxReports(); });
+  document.getElementById("sxrepCategory").addEventListener("change", e => { S.sxReportsFilter.category = e.target.value; renderSxReports(); });
+  document.getElementById("sxrepClass").addEventListener("change", e => { S.sxReportsFilter.classification = e.target.value; renderSxReports(); });
+  document.getElementById("sxrepOfficer").addEventListener("change", e => { S.sxReportsFilter.officer = e.target.value; renderSxReports(); });
+  document.getElementById("sxrepStatus").addEventListener("change", e => { S.sxReportsFilter.status = e.target.value; renderSxReports(); });
+  restoreFocus(focus);
+}
+function exportSxReportsCsv() {
+  const rows = filterSxAssetRows(S.sxReportsFilter);
+  const out = [["Fund", "Property/Inventory No.", "Category", "Description", "Location", "Accountable Officer", "Cost", "Classification", "Adjusted Cost", "Status"]];
+  rows.forEach(a => out.push([fundLabel(a.fund || "GF"), a.property_id || "", a.account_name || "", a.description || "", a.location || "", a.accountable_officer || "",
+    (a.cost || 0).toFixed(2), sxClassificationLabel(sxClassificationOf(a)), sxAdjustedCost(a).toFixed(2), a.status || ""]));
+  const csv = out.map(r => r.map(csvField).join(",")).join("\n");
+  const officerPart = S.sxReportsFilter.officer ? `_${S.sxReportsFilter.officer.replace(/[^a-zA-Z0-9]+/g, "_")}` : "";
+  browserDownload(`Semi_Expendable_Report_${S.currentFund}${officerPart}_${new Date().toISOString().slice(0, 10)}.csv`, csv, "text/csv;charset=utf-8;");
+  toast("Saved.");
+}
+function printSxLedgerCardsBulkReports() {
+  const rows = filterSxAssetRows(S.sxReportsFilter);
+  if (!rows.length) return toast("No items match the current filters.");
+  openPrintWindow("Semi-Expendable Property Ledger Cards", printCardsHtml("Semi-Expendable Property Ledger Cards", rows.map(sxLedgerCardHtml).join("")));
+}
+function printSxPropertyCardsBulkReports() {
+  const rows = filterSxAssetRows(S.sxReportsFilter);
+  if (!rows.length) return toast("No items match the current filters.");
+  openPrintWindow("Semi-Expendable Property Cards", printCardsHtml("Semi-Expendable Property Cards", rows.map(sxPropertyCardHtml).join("")));
+}
+function printSxLedgerCardsBulk() {
+  const rows = filteredSxRegisterRows();
+  if (!rows.length) return toast("No items match the current filters.");
+  openPrintWindow("Semi-Expendable Property Ledger Cards", printCardsHtml("Semi-Expendable Property Ledger Cards", rows.map(sxLedgerCardHtml).join("")));
+}
+function printSxPropertyCardsBulk() {
+  const rows = filteredSxRegisterRows();
+  if (!rows.length) return toast("No items match the current filters.");
+  openPrintWindow("Semi-Expendable Property Cards", printCardsHtml("Semi-Expendable Property Cards", rows.map(sxPropertyCardHtml).join("")));
+}
+function printSxLedgerCard(id) { const a = S.sxAssets.get(id); if (!a) return; openPrintWindow("Semi-Expendable Property Ledger Card", printCardsHtml("Semi-Expendable Property Ledger Card", sxLedgerCardHtml(a))); }
+function printSxPropertyCard(id) { const a = S.sxAssets.get(id); if (!a) return; openPrintWindow("Semi-Expendable Property Card", printCardsHtml("Semi-Expendable Property Card", sxPropertyCardHtml(a))); }
+
+/* ---------- SX printed forms — match the client's paper "Semi-Expendable Property Ledger Card"
+   and "Semi-Expendable Property Card" exactly (reference photos supplied by the client). No
+   Accumulated Depreciation column on either — that's the whole point of this module. ---------- */
+function sxLedgerCardHtml(asset) {
+  const rows = sxAssetTimeline(asset);
+  const blankRows = Math.max(0, 12 - rows.length);
+  return `
+    <div class="card">
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : `<div style="width:56px;"></div>`}
+        <div class="titles"><h1>SEMI-EXPENDABLE PROPERTY LEDGER CARD</h1></div>
+        <div class="fund">Fund Cluster:<br><b>${esc(fundLabel(asset.fund || "GF"))}</b></div>
+      </div>
+      <table class="info">
+        <tr><td class="label">Entity Name:</td><td colspan="3">LGU - CANDONI</td></tr>
+        <tr>
+          <td class="label">Semi-expendable Property:</td><td>${esc(asset.article_type) || esc(asset.account_name) || "—"}</td>
+          <td class="label">Semi-expendable Property No.:</td><td>${esc(asset.sen) || "—"}${asset.property_id ? "<br>" + esc(asset.property_id) : ""}</td>
+        </tr>
+        <tr>
+          <td class="label">Description:</td><td>${esc(asset.description) || "—"}${asset.accountable_officer ? " - " + esc(asset.accountable_officer) : ""}</td>
+          <td class="label">UACS Object Code:</td><td class="acct-box">${asset.account_code ? formatAccountCode(asset.account_code) : "—"}</td>
+        </tr>
+      </table>
+      <table class="data">
+        <thead><tr>
+          <th rowspan="2" style="width:7%">Date</th><th rowspan="2" style="width:9%">Reference</th>
+          <th colspan="3">Receipt</th>
+          <th rowspan="2" style="width:11%">Issues/Transfers/<br>Adjustments</th>
+          <th rowspan="2" style="width:10%">Accumulated<br>Impairment Losses</th>
+          <th rowspan="2" style="width:9%">Adjusted Cost</th>
+          <th colspan="2" style="width:13%">Repair History</th>
+        </tr>
+        <tr><th style="width:5%">Qty.</th><th style="width:8%">Unit Cost</th><th style="width:8%">Total Cost</th><th style="width:6%">Nature of Repair</th><th style="width:6%">Amount</th></tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => `<tr>
+            <td>${fmtDateShort(r.date)}</td>
+            <td>${esc(r.reference)}</td>
+            <td class="num">${r.kind === "acquire" ? r.qty : ""}</td>
+            <td class="num">${r.kind === "acquire" ? fmtNum(r.unitCost) : ""}</td>
+            <td class="num">${r.kind === "acquire" ? fmtNum(r.totalCost) : ""}</td>
+            <td class="num">${r.adjustmentAmt ? fmtNum(r.adjustmentAmt) : ""}</td>
+            <td class="num">${r.impairmentAmt !== "" && r.impairmentAmt ? fmtNum(r.impairmentAmt) : ""}</td>
+            <td class="num">${fmtNum(r.adjustedCost)}</td>
+            <td>${r.repairNature || ""}</td>
+            <td class="num">${r.repairAmount ? fmtNum(r.repairAmount) : ""}</td>
+          </tr>`).join("")}
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+function sxPropertyCardHtml(asset) {
+  const rows = sxAssetTimeline(asset).filter(r => r.kind === "acquire" || r.kind === "retire" || r.kind === "transfer");
+  const blankRows = Math.max(0, 10 - rows.length);
+  let balanceQty = 0;
+  const rowsWithBalance = rows.map(r => {
+    if (r.kind === "acquire") balanceQty += (asset.qty || 1);
+    if (r.kind === "retire") balanceQty = 0;
+    return { ...r, balanceQty };
+  });
+  return `
+    <div class="card">
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : `<div style="width:56px;"></div>`}
+        <div class="titles"><h1>SEMI-EXPENDABLE PROPERTY CARD</h1></div>
+        <div class="fund">Fund:<br><b>${esc(fundLabel(asset.fund || "GF"))}</b></div>
+      </div>
+      <table class="info">
+        <tr><td class="label">Semi-Expendable No.:</td><td>${esc(asset.sen) || "—"}${asset.property_id ? " / " + esc(asset.property_id) : ""}</td>
+          <td class="label">Article/Type:</td><td>${esc(asset.article_type) || "—"}</td></tr>
+        <tr><td class="label">Item Description:</td><td>${esc(asset.description) || "—"}</td>
+          <td class="label">Accountable Officer:</td><td>${esc(asset.accountable_officer) || "—"}</td></tr>
+        <tr><td class="label">Location/Office:</td><td>${esc(asset.location) || "—"}</td>
+          <td class="label">Unit of Measure:</td><td>${esc(asset.unit_of_measure) || "—"}</td></tr>
+      </table>
+      <table class="data">
+        <thead><tr>
+          <th rowspan="2" style="width:9%">Date</th><th rowspan="2" style="width:12%">Reference</th>
+          <th rowspan="2" style="width:8%">Receipt<br>Qty.</th>
+          <th colspan="3">Issue/Return/Disposal</th>
+          <th colspan="2">Balance</th>
+        </tr>
+        <tr><th style="width:7%">Qty.</th><th style="width:8%">Type</th><th style="width:14%">Remarks</th><th style="width:7%">Qty.</th><th style="width:10%">Value</th></tr>
+        </thead>
+        <tbody>
+          ${rowsWithBalance.map(r => {
+            const isReceipt = r.kind === "acquire";
+            const isDisposal = r.kind === "retire";
+            const isTransfer = r.kind === "transfer";
+            return `<tr>
+              <td>${fmtDateShort(r.date)}</td>
+              <td>${esc(r.reference)}</td>
+              <td class="num">${isReceipt ? (asset.qty || 1) : ""}</td>
+              <td class="num">${isDisposal ? (asset.qty || 1) : isTransfer ? (asset.qty || 1) : ""}</td>
+              <td>${isDisposal ? "Disposal" : isTransfer ? "Transfer" : ""}</td>
+              <td>${isDisposal ? esc(asset.retire_reason || "") : isTransfer ? esc(r.newOfficer || r.newLocation || "") : ""}</td>
+              <td class="num">${r.balanceQty}</td>
+              <td class="num">${fmtNum(r.adjustedCost)}</td>
+            </tr>`;
+          }).join("")}
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
+        </tbody>
+      </table>
+      <table class="info" style="margin-top:-1px;">
+        <tr><td class="label">Status:</td><td>${asset.status === "retired" ? "Retired" : "In Use"}</td><td class="label">Remarks:</td><td>${esc(asset.remarks) || ""}</td></tr>
+      </table>
+    </div>`;
 }
 
 /* ============================================================
@@ -2283,6 +3348,11 @@ function renderAll() {
   renderRetired();
   renderReports();
   renderCip();
+  renderSxDashboard();
+  renderSxRegister();
+  renderSxReconciliation();
+  renderSxRetired();
+  renderSxReports();
 }
 function renderPeriodStatus() {
   const last = lastPostedPeriod(S.currentFund);
@@ -2297,6 +3367,11 @@ const VIEW_TITLES = {
   retired: ["Retired Assets", "Derecognized / disposed items kept for historical reference"],
   reports: ["Reports", "Generate the Equipment Ledger Card and Property Card for any asset"],
   cip: ["Construction in Progress", "Track CIP projects and their billings, separate from the Asset Register, until each is completed and transferred to PPE"],
+  sxdashboard: ["Dashboard", "Semi-expendable property — inventory, not PPE. No depreciation."],
+  sxregister: ["Semi-Expendable Register", "Property card for every semi-expendable item — cost and classification"],
+  sxreconciliation: ["Reconciliation", "Compare the semi-expendable register against your Trial Balance, by account code"],
+  sxretired: ["Retired Items", "Derecognized / disposed semi-expendable items, kept for historical reference"],
+  sxreports: ["Reports", "Generate the Semi-Expendable Property Ledger Card and Property Card for any item"],
 };
 /** Sets the topbar title/subtitle from the current view + fund. Called on both view changes and
  *  fund switches, since the subtitle always names which fund's books are showing. */
@@ -2324,6 +3399,19 @@ function setFund(fund) {
   refreshTopbar();
   renderAll();
 }
+/** Switches which ledger module is in view — PPE (capitalized property) or Semi-Expendable
+ *  (inventory, tracked separately per the client's explicit request — see the SX section). Shows
+ *  only that module's nav tabs (the other group's buttons are hidden via the native `hidden`
+ *  attribute) and jumps to that module's own Dashboard. The Fund switcher stays as-is across a
+ *  ledger switch — both modules are fund-scoped independently off the same S.currentFund. */
+function setLedger(ledger) {
+  if (!["ppe", "sx"].includes(ledger) || ledger === S.currentLedger) return;
+  S.currentLedger = ledger;
+  try { localStorage.setItem("ppeLedgerModule", ledger); } catch (e) { /* private browsing, etc. — fine to skip */ }
+  document.querySelectorAll("#ledgerSwitch button").forEach(b => b.classList.toggle("active", b.dataset.ledger === ledger));
+  document.querySelectorAll(".navgroup").forEach(g => { g.hidden = g.dataset.ledgerGroup !== ledger; });
+  setView(ledger === "sx" ? "sxdashboard" : "dashboard");
+}
 
 /* ---------- modal helpers ---------- */
 function openModal(html) {
@@ -2339,6 +3427,7 @@ function bindStaticUI() {
   staticUiBound = true;
   document.querySelectorAll("#nav button").forEach(b => b.addEventListener("click", () => setView(b.dataset.view)));
   document.querySelectorAll("#fundSwitch button").forEach(b => b.addEventListener("click", () => setFund(b.dataset.fund)));
+  document.querySelectorAll("#ledgerSwitch button").forEach(b => b.addEventListener("click", () => setLedger(b.dataset.ledger)));
   const overlay = document.getElementById("modalOverlay");
   if (overlay) overlay.addEventListener("click", e => { if (e.target.id === "modalOverlay") closeModal(); });
 }
@@ -2351,6 +3440,13 @@ export function initApp(user) {
     if (saved && FUNDS.some(f => f.code === saved)) S.currentFund = saved;
   } catch (e) { /* private browsing, etc. — fine to skip, defaults to GF */ }
   document.querySelectorAll("#fundSwitch button").forEach(b => b.classList.toggle("active", b.dataset.fund === S.currentFund));
+  try {
+    const savedLedger = localStorage.getItem("ppeLedgerModule");
+    if (savedLedger === "ppe" || savedLedger === "sx") S.currentLedger = savedLedger;
+  } catch (e) { /* private browsing, etc. — fine to skip, defaults to ppe */ }
+  document.querySelectorAll("#ledgerSwitch button").forEach(b => b.classList.toggle("active", b.dataset.ledger === S.currentLedger));
+  document.querySelectorAll(".navgroup").forEach(g => { g.hidden = g.dataset.ledgerGroup !== S.currentLedger; });
+  if (S.currentLedger === "sx" && S.view === "dashboard") S.view = "sxdashboard";
   const emailEl = document.getElementById("authEmail");
   if (emailEl) emailEl.textContent = viewerLabel();
   bindStaticUI();
@@ -2369,7 +3465,7 @@ Object.assign(window, {
   openRevalueModal, revalueAsset,
   openTransferModal, transferAsset,
   removeAssetPhoto, removeAssetDocument, printAssetIdTag,
-  exportRegisterCsv, exportRetiredCsv, exportDepreciationDetailCsv,
+  exportRegisterCsv, exportRetiredCsv, exportDepreciationDetailCsv, exportReportsCsv,
   handleTbFileUpload,
   printLedgerCard, printPropertyCard, printLedgerCardsBulk, printPropertyCardsBulk,
   printLedgerCardsBulkReports, printPropertyCardsBulkReports,
@@ -2379,4 +3475,12 @@ Object.assign(window, {
   openCipCompleteModal, completeCipProject,
   printCipLedgerCard, printCipLedgerCardsBulk, exportCipCsv,
   openCipBulkImportModal, submitCipBulkImport,
+  setLedger,
+  openSxAssetModal, saveSxAsset, openSxAssetDetail, openSxBulkAddModal, submitSxBulkAdd,
+  openSxRetireModal, submitSxRetire, openSxLedgerEntryModal, saveSxLedgerEntry,
+  openSxTransferModal, transferSxAsset,
+  exportSxRegisterCsv, exportSxRetiredCsv, exportSxReportsCsv, exportSxReconCsv,
+  saveSxTbSnapshot, handleSxTbFileUpload,
+  printSxLedgerCard, printSxPropertyCard, printSxLedgerCardsBulk, printSxPropertyCardsBulk,
+  printSxLedgerCardsBulkReports, printSxPropertyCardsBulkReports,
 });
