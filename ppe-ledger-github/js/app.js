@@ -2395,7 +2395,7 @@ function assetEventTimeline(asset) {
 function printCardsHtml(title, cardsHtml) {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${esc(title)}</title>
   <style>
-    @page { size: legal landscape; margin: 0.4in; }
+    @page { size: A4 landscape; margin: 0.4in; }
     * { box-sizing: border-box; }
     body { font-family: "Times New Roman", Georgia, serif; color: #111; margin: 0; }
     .card { page-break-after: always; padding: 6px; }
@@ -3037,7 +3037,7 @@ async function unrecordParIcs(id) {
 function parIcsPrintHtml(title, bodyHtml) {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${esc(title)}</title>
   <style>
-    @page { size: letter portrait; margin: 0.5in; }
+    @page { size: A4 portrait; margin: 0.5in; }
     * { box-sizing: border-box; }
     body { font-family: "Times New Roman", Georgia, serif; color: #111; margin: 0; font-size: 11px; }
     .form { page-break-after: always; }
