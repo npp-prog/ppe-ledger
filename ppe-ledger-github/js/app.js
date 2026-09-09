@@ -2612,15 +2612,19 @@ function filterParIcsRows(f) {
  *  parking records became which register items. */
 function exportParIcsCsv() {
   const rows = filterParIcsRows(S.parIcsFilter);
-  const out = [["Fund", "Type", "Number", "Date Issued", "Dept/Office or Entity", "Description", "Qty", "Unit", "Amount", "Status", "Recorded Item Property/SEN", "Recorded At"]];
+  const out = [["Fund", "Type", "Number", "Property No./SEN", "Date Issued", "Dept/Office or Entity", "Description", "Qty", "Unit", "Amount", "Status", "Recorded At"]];
   rows.forEach(r => {
     const isPar = r.doc_type === "par";
     const recordedAsset = r.recorded_asset_id ? S.assets.get(r.recorded_asset_id) : null;
+    // Same fallback as the on-screen table: the linked asset's own number once recorded (a "match"
+    // can land on an item whose real number differs from what was guessed beforehand), otherwise
+    // whatever was optionally typed into the PAR/ICS itself.
+    const propNo = recordedAsset ? (isPar ? recordedAsset.property_id : recordedAsset.sen) : (isPar ? r.property_number : r.item_no);
     out.push([
-      fundLabel(r.fund || "GF"), isPar ? "PAR (PPE)" : "ICS (Semi-Expendable)", r.number || "",
+      fundLabel(r.fund || "GF"), isPar ? "PAR (PPE)" : "ICS (Semi-Expendable)", r.number || "", propNo || "",
       r.date || "", (isPar ? r.dept_office : r.entity_name) || "", r.description || "",
       r.qty || 1, r.unit || "", (isPar ? r.amount : r.cost || 0).toFixed(2),
-      r.recorded ? "Recorded" : "Pending", recordedAsset ? recordedAsset.property_id || "" : "",
+      r.recorded ? "Recorded" : "Pending",
       r.recorded_at ? fmtDate(r.recorded_at) : "",
     ]);
   });
@@ -2654,12 +2658,18 @@ function renderParIcs() {
         <button class="btn primary" onclick="openIcsModal()">+ New ICS (Semi-Expendable)</button>
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
-        <thead><tr><th>Type</th><th>Number</th><th>Dept/Office &amp; Entity</th><th>Description</th><th class="num">Qty</th><th class="num">Amount</th><th>Date</th><th>Status</th><th style="width:230px;">Actions</th></tr></thead>
+        <thead><tr><th>Type</th><th>Number</th><th>Property No./SN</th><th>Dept/Office &amp; Entity</th><th>Description</th><th class="num">Qty</th><th class="num">Amount</th><th>Date</th><th>Status</th><th style="width:230px;">Actions</th></tr></thead>
         <tbody>${rows.length ? rows.map(r => {
           const isPar = r.doc_type === "par";
+          const recordedAsset = r.recorded_asset_id ? S.assets.get(r.recorded_asset_id) : null;
+          // Once recorded, the linked asset's own Property No./SEN is authoritative (a "match" can
+          // land on an item whose real number differs from whatever was guessed beforehand); before
+          // that, fall back to whatever was optionally typed into the PAR/ICS itself.
+          const propNo = recordedAsset ? (isPar ? recordedAsset.property_id : recordedAsset.sen) : (isPar ? r.property_number : r.item_no);
           return `<tr>
             <td>${isPar ? '<span class="pill good">PAR</span>' : '<span class="pill neutral">ICS</span>'}</td>
             <td class="mono">${esc(r.number)}</td>
+            <td class="mono">${esc(propNo) || "—"}</td>
             <td class="truncate" title="${esc(isPar ? r.dept_office : r.entity_name)}">${esc(isPar ? r.dept_office : r.entity_name) || "—"}</td>
             <td class="truncate" title="${esc(r.description)}">${esc(r.description) || "—"}</td>
             <td class="num mono">${r.qty || 1}</td>
@@ -2676,7 +2686,7 @@ function renderParIcs() {
                    <button class="btn small danger" onclick="deleteParIcs('${r.id}')">Delete</button>`}
             </td>
           </tr>`;
-        }).join("") : `<tr><td colspan="9"><div class="empty">No PAR/ICS records match these filters.</div></td></tr>`}
+        }).join("") : `<tr><td colspan="10"><div class="empty">No PAR/ICS records match these filters.</div></td></tr>`}
         </tbody>
       </table></div></div>
     </div>
