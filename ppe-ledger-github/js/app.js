@@ -178,7 +178,7 @@ const S = {
   cipProjects: new Map(), // id -> CIP project doc (own collection, separate from assets)
   parIcs: new Map(),      // id -> PAR/ICS record doc (own collection, separate from assets — a
                            // "pending" one is a parking record, not yet in the Asset Register)
-  linkParIcsId: null,     // set by recordParIcs() right before opening the Add Item modal — tells
+  linkParIcsId: null,     // set by recordParIcsAsNew() right before opening the Add Item modal — tells
                            // saveAsset() which pending PAR/ICS record to mark "recorded" once the
                            // new asset is created. Reset to null at the top of every openAssetModal()
                            // call (via its `prefill.parIcsId`), so it never leaks into an unrelated add.
@@ -480,6 +480,7 @@ function renderDashboard() {
   const next = nextUnpostedPeriod(fund);
   const cipInProgress = activeCipProjects(fund);
   const cipTotal = round2(cipInProgress.reduce((s, p) => s + cipProjectTotal(p), 0));
+  const cipComplete = cipInProgress.filter(p => effectiveCipStatus(p) === "finished");
 
   // category breakdown, split by item type so PPE and Semi-Expendable categories never collide.
   // Sorted by account code (ascending) rather than by cost, so the table reads in the same order
@@ -530,6 +531,25 @@ function renderDashboard() {
           <dt>Next due</dt><dd class="mono">${periodLabel(next)}${cmpPeriod(next, todayPeriod()) < 0 ? ' <span class="pill warn">overdue</span>' : ""}</dd>
           <dt>Depreciable assets</dt><dd>${depreciableActiveAssets(fund).length} of ${ppeActive.length} active PPE items (${nonDep} non-depreciable: land, CIP, biological)</dd>
         </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <div><h3>Construction in Progress — Complete, awaiting transfer</h3><div class="desc">${cipComplete.length} project(s) have reached final billing but haven't been transferred to PPE yet</div></div>
+        <button class="btn" onclick="setView('cip')">Open Construction in Progress →</button>
+      </div>
+      <div class="panel-body${cipComplete.length ? " flush" : ""}">
+        ${cipComplete.length ? `<div class="tablewrap"><table>
+          <thead><tr><th>CIP No.</th><th>Account</th><th>Name of Project</th><th class="num">Total billed to date</th><th></th></tr></thead>
+          <tbody>${cipComplete.map(p => `<tr>
+            <td class="mono">${esc(p.cip_code) || "—"}</td>
+            <td>${formatAccountCode(p.account_code)}</td>
+            <td class="truncate" title="${esc(p.name)}">${esc(p.name) || "—"}</td>
+            <td class="num mono">${fmtMoney(cipProjectTotal(p))}</td>
+            <td><a href="#" onclick="openCipDetail('${p.id}');return false;">open →</a></td>
+          </tr>`).join("")}</tbody>
+        </table></div>` : `<div class="empty">No projects are marked Complete right now.</div>`}
       </div>
     </div>
 
@@ -708,7 +728,7 @@ function assetCategoryOptions(selectedCode) {
  *  the fact would leave stale PPE-only or SX-only fields behind; retire it and add a new one instead
  *  if it was categorized wrong to begin with.
  *
- *  `prefill`, when given (only for a brand-new item — recordParIcs() is the one caller that passes
+ *  `prefill`, when given (only for a brand-new item — recordParIcsAsNew() is the one caller that passes
  *  it), pre-populates the common fields from a pending PAR/ICS record and locks the Item Type the
  *  same way editing does, since the record already committed it (PAR → PPE, ICS → Semi-Expendable).
  *  `prefill.parIcsId` is what tells saveAsset() which PAR/ICS record to mark "recorded" once the new
@@ -865,7 +885,7 @@ function openAssetModal(existingId, initialType, prefill) {
 async function saveAsset(existingId) {
   if (!S.db) return toast("No shared database in this view.");
   const existing = existingId ? S.assets.get(existingId) : null;
-  // Captured up front, before any awaits — recordParIcs()/openAssetModal() set this right before
+  // Captured up front, before any awaits — recordParIcsAsNew()/openAssetModal() set this right before
   // this modal opened, and only a brand-new item (never an edit) links back to a PAR/ICS record.
   const linkParIcsId = !existingId ? S.linkParIcsId : null;
   const linkParIcsRecord = linkParIcsId ? S.parIcs.get(linkParIcsId) : null;
@@ -2578,6 +2598,29 @@ function filterParIcsRows(f) {
   rows.sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
   return rows;
 }
+/** Summary CSV of PAR/ICS records — respects the tab's current search/type/status filters, same
+ *  pattern as exportReportsCsv/exportCipCsv. Includes the linked Property/SEN once a record has
+ *  been recorded (or matched) into the Asset Register, so this doubles as an audit trail of which
+ *  parking records became which register items. */
+function exportParIcsCsv() {
+  const rows = filterParIcsRows(S.parIcsFilter);
+  const out = [["Fund", "Type", "Number", "Date Issued", "Dept/Office or Entity", "Description", "Qty", "Unit", "Amount", "Status", "Recorded Item Property/SEN", "Recorded At"]];
+  rows.forEach(r => {
+    const isPar = r.doc_type === "par";
+    const recordedAsset = r.recorded_asset_id ? S.assets.get(r.recorded_asset_id) : null;
+    out.push([
+      fundLabel(r.fund || "GF"), isPar ? "PAR (PPE)" : "ICS (Semi-Expendable)", r.number || "",
+      r.date || "", (isPar ? r.dept_office : r.entity_name) || "", r.description || "",
+      r.qty || 1, r.unit || "", (isPar ? r.amount : r.cost || 0).toFixed(2),
+      r.recorded ? "Recorded" : "Pending", recordedAsset ? recordedAsset.property_id || "" : "",
+      r.recorded_at ? fmtDate(r.recorded_at) : "",
+    ]);
+  });
+  const csv = out.map(r => r.map(csvField).join(",")).join("\n");
+  const typePart = S.parIcsFilter.docType ? `_${S.parIcsFilter.docType.toUpperCase()}` : "";
+  browserDownload(`PAR_ICS_Summary_${S.currentFund}${typePart}_${new Date().toISOString().slice(0, 10)}.csv`, csv, "text/csv;charset=utf-8;");
+  toast("Saved.");
+}
 function renderParIcs() {
   const el = document.getElementById("view-parics");
   if (!el) return; // older index.html without the PAR/ICS nav tab/container — nothing to render into
@@ -2598,7 +2641,8 @@ function renderParIcs() {
           <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
         </select>
         <span style="flex:1"></span>
-        <button class="btn" onclick="openParModal()">+ New PAR (PPE)</button>
+        <button class="btn" onclick="exportParIcsCsv()">Download CSV</button>
+        <button class="btn primary" onclick="openParModal()">+ New PAR (PPE)</button>
         <button class="btn primary" onclick="openIcsModal()">+ New ICS (Semi-Expendable)</button>
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
@@ -2619,7 +2663,7 @@ function renderParIcs() {
               ${r.recorded
                 ? `<span class="subtle" style="font-size:11px;">→ <a href="#" onclick="openAssetDetail('${r.recorded_asset_id}');return false;">view item</a></span>`
                 : `<button class="btn small" style="margin-right:4px;" onclick="${isPar ? "openParModal" : "openIcsModal"}('${r.id}')">Edit</button>
-                   <button class="btn small primary" style="margin-right:4px;" onclick="recordParIcs('${r.id}')">Record →</button>
+                   <button class="btn small primary" style="margin-right:4px;" onclick="recordParIcsChoice('${r.id}')">Record →</button>
                    <button class="btn small danger" onclick="deleteParIcs('${r.id}')">Delete</button>`}
             </td>
           </tr>`;
@@ -2813,10 +2857,33 @@ async function deleteParIcs(id) {
   toast("Deleted.");
 }
 
+/** "Record →" opens this chooser first, rather than jumping straight into the Add Item modal —
+ *  some items were already manually entered in the Register before their PAR/ICS was generated
+ *  (e.g. during initial onboarding), and creating a new item for those would duplicate them.
+ *  The two paths: recordParIcsAsNew() (the original create-new-item flow) or
+ *  openMatchParIcsModal() (link this record to an item that's already there). */
+function recordParIcsChoice(id) {
+  const r = S.parIcs.get(id);
+  if (!r) return;
+  if (r.recorded) return toast("Already recorded.");
+  const isPar = r.doc_type === "par";
+  const label = isPar ? "PAR" : "ICS";
+  openModal(`
+    <div class="modal-head"><h3>Record ${esc(r.number)}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p class="subtle" style="margin-top:0;">How should this ${label} be recorded into the Asset Register?</p>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        <button class="btn primary" style="width:100%;justify-content:center;" onclick="recordParIcsAsNew('${id}')">+ Create a new item, pre-filled from this ${label}</button>
+        <button class="btn" style="width:100%;justify-content:center;" onclick="openMatchParIcsModal('${id}')">🔗 Match to an item already in the Register</button>
+      </div>
+      <p class="subtle" style="margin-top:14px;margin-bottom:0;font-size:12px;">Use "Match" if this item was already entered in the Register before this ${label} was generated — that links the two records instead of creating a duplicate.</p>
+    </div>
+  `);
+}
 /** Opens the unified Add Item modal pre-filled from a pending PAR/ICS record — the "catch it into
  *  the register" step. openAssetModal() locks the Item Type (PAR → PPE, ICS → Semi-Expendable) and
  *  sets S.linkParIcsId so saveAsset() marks this record "recorded" once the new asset is saved. */
-function recordParIcs(id) {
+function recordParIcsAsNew(id) {
   const r = S.parIcs.get(id);
   if (!r) return;
   if (r.recorded) return toast("Already recorded.");
@@ -2836,6 +2903,71 @@ function recordParIcs(id) {
         sen: r.number, remarks: `ICS No. ${r.number}`,
       };
   openAssetModal(null, prefill.itemType, prefill);
+}
+/** Manual-match flow: search the current fund's already-existing items (of the type this PAR/ICS
+ *  implies) and link one directly, instead of creating a new item. The search input is re-rendered
+ *  into its own #matchResults container (not the whole modal) so it keeps keyboard focus while
+ *  typing — same reasoning as captureFocus/restoreFocus elsewhere, just scoped to a modal. */
+function openMatchParIcsModal(id) {
+  const r = S.parIcs.get(id);
+  if (!r) return;
+  const isPar = r.doc_type === "par";
+  const label = isPar ? "PAR" : "ICS";
+  openModal(`
+    <div class="modal-head"><h3>Match ${esc(r.number)} to an existing item</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p class="subtle" style="margin-top:0;">Pick the ${isPar ? "PPE" : "Semi-Expendable"} item already in the ${esc(fundLabel(S.currentFund))} register that this ${label} belongs to — this links the two records instead of creating a new item.</p>
+      <input type="text" id="matchSearch" placeholder="Search property/SEN, description, location…">
+      <div id="matchResults" style="margin-top:10px;"></div>
+      <button class="btn" style="margin-top:12px;" onclick="recordParIcsChoice('${id}')">← Back</button>
+    </div>
+  `);
+  document.getElementById("matchSearch").addEventListener("input", e => renderMatchParIcsResults(id, e.target.value));
+  renderMatchParIcsResults(id, "");
+  document.getElementById("matchSearch").focus();
+}
+function renderMatchParIcsResults(id, q) {
+  const el = document.getElementById("matchResults");
+  const r = S.parIcs.get(id);
+  if (!el || !r) return;
+  const isPar = r.doc_type === "par";
+  const wantType = isPar ? "ppe" : "sx";
+  const query = (q || "").trim().toLowerCase();
+  let candidates = activeAssets(S.currentFund).filter(a => itemTypeOf(a) === wantType);
+  if (query) candidates = candidates.filter(a => [a.property_id, a.description, a.location, a.accountable_officer].some(v => v && String(v).toLowerCase().includes(query)));
+  candidates.sort((a, b) => (a.property_id || "").localeCompare(b.property_id || ""));
+  const shown = candidates.slice(0, 40);
+  el.innerHTML = `<div class="tablewrap" style="max-height:320px;overflow-y:auto;"><table>
+    <thead><tr><th>Property/SEN</th><th>Description</th><th>Location</th><th class="num">Cost</th><th></th></tr></thead>
+    <tbody>${shown.length ? shown.map(a => `
+      <tr>
+        <td class="mono">${esc(a.property_id) || "—"}</td>
+        <td class="truncate" title="${esc(a.description)}">${esc(a.description) || "—"}</td>
+        <td class="truncate">${esc(a.location) || "—"}</td>
+        <td class="num mono">${fmtMoney(a.cost)}</td>
+        <td><button class="btn small primary" onclick="matchParIcsToExisting('${id}','${a.id}')">Match</button></td>
+      </tr>`).join("") : `<tr><td colspan="5"><div class="empty">No matching ${isPar ? "PPE" : "Semi-Expendable"} items found in ${esc(fundLabel(S.currentFund))}${query ? " for this search" : ""}.</div></td></tr>`}
+    </tbody>
+  </table></div>${candidates.length > shown.length ? `<div class="subtle" style="margin-top:6px;font-size:11px;">Showing the first ${shown.length} of ${candidates.length} matches — narrow your search to find a specific one.</div>` : ""}`;
+}
+/** Links a pending PAR/ICS record directly to an item that's already in the Register, without
+ *  creating a new asset. Marks the record Recorded (same as the create-new path) and, if the asset
+ *  doesn't already reference a source PAR/ICS, backfills that link onto it too for traceability. */
+async function matchParIcsToExisting(parIcsId, assetId) {
+  const r = S.parIcs.get(parIcsId);
+  const a = S.assets.get(assetId);
+  if (!r || !a) return;
+  if (r.recorded) return toast("Already recorded.");
+  const label = r.doc_type === "par" ? "PAR" : "ICS";
+  if (!confirm(`Match ${r.number} to ${a.property_id || a.description || "this item"}? This marks the ${label} as Recorded and links it to that existing item — no new item will be created.`)) return;
+  await S.db.collection("par_ics").doc(parIcsId).update({
+    recorded: true, recorded_asset_id: assetId, recorded_at: new Date().toISOString(), recorded_by: viewerLabel(), matched_existing: true,
+  });
+  if (!a.source_par_ics_id) {
+    await S.db.collection("assets").doc(assetId).update({ source_par_ics_id: parIcsId, source_par_ics_no: r.number });
+  }
+  closeModal();
+  toast(`${r.number} matched to the existing item and marked Recorded.`);
 }
 
 /** Portrait print wrapper for PAR/ICS — kept separate from printCardsHtml() (which is landscape,
@@ -3584,5 +3716,6 @@ Object.assign(window, {
   openCipBulkImportModal, submitCipBulkImport,
   openSxBulkAddModal, submitSxBulkAdd,
   openSxLedgerEntryModal, saveSxLedgerEntry,
-  openParModal, openIcsModal, saveParIcs, deleteParIcs, recordParIcs, printPar, printIcs,
+  openParModal, openIcsModal, saveParIcs, deleteParIcs, printPar, printIcs, exportParIcsCsv,
+  recordParIcsChoice, recordParIcsAsNew, openMatchParIcsModal, matchParIcsToExisting,
 });
