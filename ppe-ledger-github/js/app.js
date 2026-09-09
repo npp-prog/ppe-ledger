@@ -532,7 +532,7 @@ function renderDashboard() {
     <div class="panel">
       <div class="panel-head">
         <div><h3>Depreciation posting status</h3></div>
-        <button class="btn primary" onclick="setView('depreciation')">Go to Monthly Depreciation →</button>
+        <button class="btn primary" onclick="setView('depreciation')">Go to Depreciation →</button>
       </div>
       <div class="panel-body">
         <div class="kv" style="grid-template-columns:180px 1fr;">
@@ -4153,7 +4153,7 @@ function renderPeriodStatus() {
 const VIEW_TITLES = {
   dashboard: ["Dashboard", "PPE and Semi-Expendable Property, together in one place"],
   register: ["Asset Register", "Property card for every item — PPE and Semi-Expendable — tagged by type"],
-  depreciation: ["Monthly Depreciation", "Compute, post, and generate the JEV summary for a period — PPE only"],
+  depreciation: ["Depreciation", "Compute, post, and generate the JEV summary for a period — PPE only"],
   reconciliation: ["Reconciliation", "Compare the register against your Trial Balance, by account code — PPE and Semi-Expendable"],
   retired: ["Retired Assets", "Derecognized / disposed items kept for historical reference"],
   reports: ["Reports", "Generate the Equipment Ledger Card and Property Card for any item"],
