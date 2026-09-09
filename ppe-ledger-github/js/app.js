@@ -616,6 +616,10 @@ function openAssetModal(existingId) {
         <div class="field"><label>5% Residual value (Php)</label><input type="number" step="0.01" id="f_residual" value="${a ? a.residual_value : ""}"></div>
         <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="f_life" value="${a ? a.useful_life_years : ""}"></div>
       </div>
+      <div class="field" id="f_baselinead_wrap">
+        <label>Already-accumulated depreciation as of ${periodLabel(BASELINE_PERIOD)} (Php)<br><span class="subtle" style="font-size:11px;font-weight:400;">Only for a pre-existing item that was already partly (or fully) depreciated before this baseline — e.g. an older SEF/Trust Fund asset you're entering for the first time. Leave 0 for something newly acquired; the app will depreciate it forward from its acquisition date instead.</span></label>
+        <input type="number" step="0.01" id="f_baselinead" value="${a ? (a.accum_depr_baseline || 0) : 0}">
+      </div>
       <div class="field"><label>PAR / DV reference</label><input id="f_remarks" value="${esc(a ? a.remarks : "")}" placeholder="e.g. PAR No. 2026-01-0004"></div>
       <div class="fieldrow">
         <div class="field"><label>How was this item acquired?</label>
@@ -657,6 +661,7 @@ function openAssetModal(existingId) {
     document.getElementById("f_preview").textContent = info.depreciable
       ? `Straight-line: ${fmtMoney(monthly)} / month once depreciation starts (the month after acquisition).`
       : `${info.name} is not depreciated (land, construction-in-progress, or biological asset).`;
+    document.getElementById("f_baselinead_wrap").style.display = info.depreciable ? "" : "none";
   };
   ["f_cost", "f_residual", "f_life", "f_account"].forEach(id => document.getElementById(id).addEventListener("input", updatePreview));
   document.getElementById("f_account").addEventListener("change", () => {
@@ -688,6 +693,7 @@ async function saveAsset(existingId) {
     acquisition_source: acquisitionType === "purchased" ? "" : document.getElementById("f_acqsource").value.trim(),
     cost, residual_value: round2(Number(document.getElementById("f_residual").value) || 0),
     useful_life_years: Number(document.getElementById("f_life").value) || 0,
+    accum_depr_baseline: round2(Number(document.getElementById("f_baselinead").value) || 0),
     depreciable: !!info.depreciable,
     status: "active",
     updated_by: viewerLabel(), updated_at: new Date().toISOString(),
@@ -703,7 +709,6 @@ async function saveAsset(existingId) {
     if (existingId) {
       await S.db.collection("assets").doc(existingId).update(rec);
     } else {
-      rec.accum_depr_baseline = 0;
       rec.source_sheet = "Added in app";
       const ref = await S.db.collection("assets").add(rec);
       id = ref.id;
@@ -1013,7 +1018,8 @@ function openBulkAddModal() {
     <div class="modal-body">
       <p class="subtle">These will be added to <b>${esc(fundLabel(S.currentFund))}</b> — switch funds in the sidebar first if that's not right.</p>
       <p class="subtle">Upload a CSV file, or paste rows copied from a spreadsheet — one asset per line, columns in this order:</p>
-      <p class="mono subtle" style="font-size:11.5px;">account_code, property_id, date_acquired (YYYY-MM-DD), description, location, accountable_officer, cost, residual_value, useful_life_years</p>
+      <p class="mono subtle" style="font-size:11.5px;">account_code, property_id, date_acquired (YYYY-MM-DD), description, location, accountable_officer, cost, residual_value, useful_life_years, accum_depr_baseline (optional)</p>
+      <p class="subtle" style="font-size:12px;">The last column is optional — leave it off entirely for newly acquired items (starts at 0, depreciates forward from date_acquired). Fill it in only for a <b>pre-existing</b> asset that was already partly or fully depreciated before ${esc(periodLabel(BASELINE_PERIOD))} — e.g. importing older SEF/Trust Fund records — with the Php amount already accumulated as of that date.</p>
       <div class="field" style="margin-top:10px;">
         <label>CSV file</label>
         <input type="file" id="bulkFile" accept=".csv,text/csv">
@@ -1075,7 +1081,7 @@ async function submitBulkAdd() {
   if (!rows.length) return toast("No valid rows found.");
   let added = 0;
   for (const cols of rows) {
-    const [code, propid, date, desc, loc, officer, cost, residual, life] = cols;
+    const [code, propid, date, desc, loc, officer, cost, residual, life, baselineAd] = cols;
     const info = accountInfo(Number(code));
     const c = round2(Number(cost) || 0);
     if (c <= 0) continue;
@@ -1086,7 +1092,7 @@ async function submitBulkAdd() {
       property_id: propid || "", date_acquired: date || null, description: desc || "",
       location: loc || "", accountable_officer: officer || "", remarks: "",
       cost: c, residual_value: round2(Number(residual) || c * 0.05), useful_life_years: Number(life) || 0,
-      depreciable: !!info.depreciable, status: "active", accum_depr_baseline: 0,
+      depreciable: !!info.depreciable, status: "active", accum_depr_baseline: round2(Number(baselineAd) || 0),
       source_sheet: "Bulk import", updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     });
     added++;
