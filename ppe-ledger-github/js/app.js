@@ -3,7 +3,7 @@
    Municipal Government Office, Candoni — General Fund PPE
    (Standalone / Firebase edition — ported from the Claude Artifact version)
    ============================================================ */
-import { db, browserDownload } from "./firebase.js";
+import { db, browserDownload, uploadFile, deleteFile } from "./firebase.js";
 
 /* ---------- Chart-of-accounts catalog (fixed reference data — not user data) ---------- */
 const ACCOUNT_CATALOG = [
@@ -64,6 +64,22 @@ const ACCOUNT_BY_CODE = {};
 ACCOUNT_CATALOG.forEach(([group, code, name, dep, expCode, expName]) => {
   ACCOUNT_BY_CODE[code] = { group, code, name, depreciable: dep, expCode, expName };
 });
+/** The 3 "Construction in Progress" cost account codes — CIP projects (tracked in their own
+ *  section, separate from the Asset Register) live under these, and a CIP project's running
+ *  total still counts toward these accounts' cost in Reconciliation until it's capitalized. */
+const CIP_ACCOUNT_CODES = ACCOUNT_CATALOG.filter(([g]) => g === "Construction in Progress").map(([, code]) => code);
+function isCipAccount(code) { return CIP_ACCOUNT_CODES.includes(Number(code)); }
+
+/** Acquisition types an Asset Register / CIP-transfer entry can record, beyond a normal
+ *  purchase — request was "not only acquired item but also found at the station and donated
+ *  items received". Missing/undefined on an existing asset doc means "purchased" (no
+ *  migration needed for the records already in production). */
+const ACQUISITION_TYPES = [
+  { code: "purchased", label: "Purchased / acquired" },
+  { code: "found", label: "Found at the station" },
+  { code: "donated", label: "Donated" },
+];
+function acquisitionTypeLabel(code) { return (ACQUISITION_TYPES.find(t => t.code === code) || ACQUISITION_TYPES[0]).label; }
 function accountInfo(code) {
   return ACCOUNT_BY_CODE[code] || { group: "Other", code, name: "Account " + code, depreciable: false, expCode: null, expName: null };
 }
@@ -138,11 +154,13 @@ const S = {
   assets: new Map(),      // id -> asset doc
   postings: new Map(),    // period -> {period, amounts:{}, postedAt, postedBy}
   tbSnapshots: new Map(), // period -> {period, accounts:{}, ...}
+  cipProjects: new Map(), // id -> CIP project doc (own collection, separate from assets)
   view: "dashboard",
   currentFund: "GF",      // which fund's books are currently in view — set by setFund(), restored from localStorage
   currentUser: null,      // Firebase Auth user, set by initApp()
   registerFilter: { q: "", category: "", status: "active" },
   reportsFilter: { q: "", category: "", status: "active" },
+  cipFilter: { q: "", status: "in_progress" },
   depPeriod: null,   // chosen period for Monthly Depreciation view
   reconPeriod: null, // chosen period for Reconciliation view
   reconDraft: "",    // unsaved Trial Balance text (pasted or uploaded) not yet tied to a saved period
@@ -229,15 +247,38 @@ function lastPostedPeriod(fund) {
 function activeAssets(fund) { return [...S.assets.values()].filter(a => a.status === "active" && (a.fund || "GF") === fund); }
 function depreciableActiveAssets(fund) { return activeAssets(fund).filter(a => a.depreciable); }
 
+/* ---------- CIP (Construction in Progress) engine ----------
+   CIP projects are tracked in their own collection/section, separate from the Asset Register —
+   each accumulates multiple contractor billings over the life of a project before eventually
+   being "completed" (capitalized) into a regular PPE asset. Until that happens, an in-progress
+   project's running total still needs to show up wherever its account code (one of
+   CIP_ACCOUNT_CODES) is reconciled against the Trial Balance, exactly as if it were still one
+   register row — see distinctCostAccounts/registryCostFor below. */
+function cipProjectsInFund(fund) { return [...S.cipProjects.values()].filter(p => (p.fund || "GF") === fund); }
+/** In-progress (not yet transferred/capitalized) CIP projects for a fund — these are the ones
+ *  whose cost still needs to reconcile against the Trial Balance under their CIP account code. */
+function activeCipProjects(fund) { return cipProjectsInFund(fund).filter(p => p.status !== "completed"); }
+function cipBillingTotal(b) {
+  return round2((Number(b.by_contract) || 0) + (Number(b.admin_materials) || 0) + (Number(b.admin_labor) || 0) +
+    (Number(b.admin_overhead) || 0) + (Number(b.admin_consultancy) || 0) + (Number(b.admin_others) || 0) +
+    (Number(b.transfers_adjustments) || 0));
+}
+function cipProjectTotal(p) { return round2((p.billings || []).reduce((s, b) => s + cipBillingTotal(b), 0)); }
+
 /* ---------- Reconciliation engine ---------- */
-/** distinct {code,name} cost accounts actually used in one fund's active register, sorted by code */
+/** distinct {code,name} cost accounts actually used in one fund's active register, sorted by
+ *  code — includes CIP account codes with an in-progress project even though those projects no
+ *  longer live in the Asset Register itself, so Reconciliation keeps covering them. */
 function distinctCostAccounts(fund) {
   const map = new Map();
   activeAssets(fund).forEach(a => { if (!map.has(a.account_code)) map.set(a.account_code, a.account_name); });
+  activeCipProjects(fund).forEach(p => { if (!map.has(p.account_code)) map.set(p.account_code, p.account_name); });
   return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([code, name]) => ({ code, name }));
 }
 function registryCostFor(code, fund) {
-  return round2(activeAssets(fund).filter(a => a.account_code === code).reduce((s, a) => s + (a.cost || 0), 0));
+  const assetCost = round2(activeAssets(fund).filter(a => a.account_code === code).reduce((s, a) => s + (a.cost || 0), 0));
+  const cipCost = round2(activeCipProjects(fund).filter(p => p.account_code === code).reduce((s, p) => s + cipProjectTotal(p), 0));
+  return round2(assetCost + cipCost);
 }
 function registryADFor(code, period, fund) {
   return round2(activeAssets(fund).filter(a => a.account_code === code && a.depreciable)
@@ -329,6 +370,10 @@ function initDb() {
       snap => { S.tbSnapshots.clear(); snap.docs.forEach(d => S.tbSnapshots.set(d.id, d.data())); renderAll(); },
       err => console.error(err)
     );
+    db.collection("cip_projects").onSnapshot(
+      snap => { S.cipProjects.clear(); snap.docs.forEach(d => S.cipProjects.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
+      err => console.error(err)
+    );
   } catch (e) {
     console.error(e);
     setSync(false, "Database unavailable — check your Firebase configuration.");
@@ -354,6 +399,8 @@ function renderDashboard() {
   const nonDep = active.filter(a => !a.depreciable).length;
   const last = lastPostedPeriod(fund);
   const next = nextUnpostedPeriod(fund);
+  const cipInProgress = activeCipProjects(fund);
+  const cipTotal = round2(cipInProgress.reduce((s, p) => s + cipProjectTotal(p), 0));
 
   // category breakdown
   const byCat = new Map();
@@ -378,6 +425,7 @@ function renderDashboard() {
       <div class="card"><div class="label">Accumulated Depreciation</div><div class="value">${fmtMoney(totalAD)}</div><div class="foot">as of ${last ? periodShort(last) : periodShort(BASELINE_PERIOD)}</div></div>
       <div class="card"><div class="label">Carrying Amount</div><div class="value">${fmtMoney(totalCarrying)}</div><div class="foot">net book value, all classes</div></div>
       <div class="card"><div class="label">Reconciliation</div><div class="value" style="color:${flags.length ? "var(--bad)" : "var(--good)"}">${latestTbPeriod ? flags.length + " to check" : "—"}</div><div class="foot">${latestTbPeriod ? okCount + " accounts tie out • " + periodShort(latestTbPeriod) : "No Trial Balance loaded yet"}</div></div>
+      <div class="card"><div class="label">Construction in Progress</div><div class="value">${fmtMoney(cipTotal)}</div><div class="foot">${cipInProgress.length} project(s) in progress · <a href="#" onclick="setView('cip');return false;">view</a></div></div>
     </div>
 
     <div class="panel">
@@ -539,14 +587,36 @@ function openAssetModal(existingId) {
         <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="f_life" value="${a ? a.useful_life_years : ""}"></div>
       </div>
       <div class="field"><label>PAR / DV reference</label><input id="f_remarks" value="${esc(a ? a.remarks : "")}" placeholder="e.g. PAR No. 2026-01-0004"></div>
+      <div class="fieldrow">
+        <div class="field"><label>How was this item acquired?</label>
+          <select id="f_acqtype">${ACQUISITION_TYPES.map(t => `<option value="${t.code}" ${(a ? (a.acquisition_type || "purchased") : "purchased") === t.code ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>
+        </div>
+        <div class="field" id="f_acqsource_wrap" style="display:none;"><label id="f_acqsource_label">Donor name</label><input id="f_acqsource" value="${esc(a ? a.acquisition_source : "")}"></div>
+      </div>
       <div class="banner info" id="f_preview" style="margin-top:4px;"></div>
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <label style="margin-bottom:6px;">Attachments (optional)</label>
+      <div class="fieldrow">
+        <div class="field"><label class="subtle" style="font-size:11px;">Photo${a && a.photo_url ? " (replace)" : ""}</label><input type="file" id="f_photo" accept="image/*"></div>
+        <div class="field"><label class="subtle" style="font-size:11px;">Document, e.g. PAR${a && a.document_url ? " (replace)" : ""}</label><input type="file" id="f_document" accept="image/*,.pdf"></div>
+      </div>
     </div>
     <div class="modal-foot">
       ${a ? `<button class="btn danger" style="margin-right:auto" onclick="retireAsset('${a.id}')">Retire this asset</button>` : ""}
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn primary" onclick="saveAsset(${a ? `'${a.id}'` : "null"})">${a ? "Save changes" : "Add asset"}</button>
+      <button class="btn primary" id="f_saveBtn" onclick="saveAsset(${a ? `'${a.id}'` : "null"})">${a ? "Save changes" : "Add asset"}</button>
     </div>
   `);
+  const updateAcqSource = () => {
+    const type = document.getElementById("f_acqtype").value;
+    const wrap = document.getElementById("f_acqsource_wrap");
+    const label = document.getElementById("f_acqsource_label");
+    if (type === "purchased") { wrap.style.display = "none"; return; }
+    wrap.style.display = "";
+    label.textContent = type === "donated" ? "Donor name" : "Found at / reference";
+  };
+  document.getElementById("f_acqtype").addEventListener("change", updateAcqSource);
+  updateAcqSource();
   const updatePreview = () => {
     const cost = Number(document.getElementById("f_cost").value) || 0;
     const res = Number(document.getElementById("f_residual").value) || 0;
@@ -573,6 +643,7 @@ async function saveAsset(existingId) {
   const info = accountInfo(code);
   const cost = round2(Number(document.getElementById("f_cost").value) || 0);
   if (cost <= 0) return toast("Enter a cost greater than zero.");
+  const acquisitionType = document.getElementById("f_acqtype").value;
   const rec = {
     fund: document.getElementById("f_fund").value,
     account_code: code, account_name: info.name, ad_account_code: code + 1,
@@ -583,24 +654,55 @@ async function saveAsset(existingId) {
     location: document.getElementById("f_loc").value.trim(),
     accountable_officer: document.getElementById("f_officer").value.trim(),
     remarks: document.getElementById("f_remarks").value.trim(),
+    acquisition_type: acquisitionType,
+    acquisition_source: acquisitionType === "purchased" ? "" : document.getElementById("f_acqsource").value.trim(),
     cost, residual_value: round2(Number(document.getElementById("f_residual").value) || 0),
     useful_life_years: Number(document.getElementById("f_life").value) || 0,
     depreciable: !!info.depreciable,
     status: "active",
     updated_by: viewerLabel(), updated_at: new Date().toISOString(),
   };
+  const photoFile = document.getElementById("f_photo").files[0];
+  const documentFile = document.getElementById("f_document").files[0];
+  const saveBtn = document.getElementById("f_saveBtn");
+  const busy = photoFile || documentFile;
+  if (busy) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
   try {
+    let id = existingId;
+    const existing = existingId ? S.assets.get(existingId) : null;
     if (existingId) {
       await S.db.collection("assets").doc(existingId).update(rec);
-      toast("Asset updated.");
     } else {
       rec.accum_depr_baseline = 0;
       rec.source_sheet = "Added in app";
-      await S.db.collection("assets").add(rec);
-      toast("Asset added.");
+      const ref = await S.db.collection("assets").add(rec);
+      id = ref.id;
     }
+    // Attachments upload after the doc exists, so a brand-new asset has an ID to key its
+    // Storage paths on; only touches Storage/the doc again if a file was actually chosen.
+    if (photoFile || documentFile) {
+      const attach = {};
+      if (photoFile) {
+        if (existing && existing.photo_path) await deleteFile(existing.photo_path);
+        const ext = (photoFile.name.split(".").pop() || "jpg").toLowerCase();
+        const { url, path } = await uploadFile(`assets/${id}/photo_${Date.now()}.${ext}`, photoFile);
+        attach.photo_url = url; attach.photo_path = path;
+      }
+      if (documentFile) {
+        if (existing && existing.document_path) await deleteFile(existing.document_path);
+        const ext = (documentFile.name.split(".").pop() || "pdf").toLowerCase();
+        const { url, path } = await uploadFile(`assets/${id}/document_${Date.now()}.${ext}`, documentFile);
+        attach.document_url = url; attach.document_path = path; attach.document_name = documentFile.name;
+      }
+      await S.db.collection("assets").doc(id).update(attach);
+    }
+    toast(existingId ? "Asset updated." : "Asset added.");
     closeModal();
-  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+  } catch (e) {
+    console.error(e);
+    toast("Couldn't save — try again." + (busy ? " (Check that Firebase Storage is set up — see README.)" : ""));
+    if (busy) { saveBtn.disabled = false; saveBtn.textContent = existingId ? "Save changes" : "Add asset"; }
+  }
 }
 
 async function retireAsset(id) {
@@ -629,6 +731,7 @@ function openAssetDetail(id) {
         <dt>Location</dt><dd>${esc(a.location) || "—"}</dd>
         <dt>Accountable officer</dt><dd>${esc(a.accountable_officer) || "—"}</dd>
         <dt>Date acquired</dt><dd>${fmtDate(a.date_acquired)}</dd>
+        <dt>How acquired</dt><dd>${esc(acquisitionTypeLabel(a.acquisition_type))}${a.acquisition_type && a.acquisition_type !== "purchased" && a.acquisition_source ? " — " + esc(a.acquisition_source) : ""}</dd>
         <dt>Reference</dt><dd>${esc(a.remarks) || "—"}</dd>
         <dt>Status</dt><dd>${a.status === "retired" ? '<span class="pill neutral">Retired</span>' : '<span class="pill good">Active</span>'}</dd>
       </div>
@@ -645,17 +748,108 @@ function openAssetDetail(id) {
         const last = a.revaluations[a.revaluations.length - 1];
         return `<p class="subtle" style="font-size:11.5px;margin-top:12px;">Revalued ${a.revaluations.length} time(s) — last ${fmtDate(last.date)}: ${fmtMoney(last.old_cost)} &rarr; ${fmtMoney(last.new_cost)}${last.reason ? " (" + esc(last.reason) + ")" : ""}</p>`;
       })() : ""}
+      ${a.transfers && a.transfers.length ? (() => {
+        const last = a.transfers[a.transfers.length - 1];
+        return `<p class="subtle" style="font-size:11.5px;margin-top:6px;">Transferred ${a.transfers.length} time(s) — last ${fmtDate(last.date)}: ${esc(last.old_location || "—")} &rarr; ${esc(last.new_location || "—")}${last.reason ? " (" + esc(last.reason) + ")" : ""}</p>`;
+      })() : ""}
       ${a.source_sheet ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">Source: ${esc(a.source_sheet)}${a.updated_by ? " • last edited by " + esc(a.updated_by) : ""}</p>` : ""}
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <label style="margin-bottom:6px;">Attachments</label>
+      <div class="fieldrow" style="align-items:flex-start;">
+        <div class="field">
+          <label class="subtle" style="font-size:11px;">Photo</label>
+          ${a.photo_url
+            ? `<div><img src="${esc(a.photo_url)}" alt="Asset photo" style="max-width:160px;max-height:120px;border:1px solid var(--line);border-radius:6px;display:block;"></div>
+               <button class="btn small ghost" style="margin-top:6px;" onclick="removeAssetPhoto('${a.id}')">Remove photo</button>`
+            : `<div class="subtle" style="font-size:12px;">No photo attached — add one from Edit.</div>`}
+        </div>
+        <div class="field">
+          <label class="subtle" style="font-size:11px;">Document (e.g. PAR)</label>
+          ${a.document_url
+            ? `<div><a href="${esc(a.document_url)}" target="_blank" rel="noopener">${esc(a.document_name || "View document")}</a></div>
+               <button class="btn small ghost" style="margin-top:6px;" onclick="removeAssetDocument('${a.id}')">Remove document</button>`
+            : `<div class="subtle" style="font-size:12px;">No document attached — add one from Edit.</div>`}
+        </div>
+        <div class="field">
+          <label class="subtle" style="font-size:11px;">QR tag</label>
+          <div id="assetQrBox" style="width:96px;height:96px;background:#fff;border:1px solid var(--line);border-radius:6px;"></div>
+          <button class="btn small ghost" style="margin-top:6px;" onclick="printAssetIdTag('${a.id}')">Print tag</button>
+        </div>
+      </div>
     </div>
     <div class="modal-foot">
       ${a.status === "active" ? `<button class="btn danger" style="margin-right:auto" onclick="retireAsset('${a.id}')">Retire</button>` : ""}
       <button class="btn ghost" onclick="closeModal()">Close</button>
       <button class="btn" onclick="printLedgerCard('${a.id}')">Ledger Card</button>
       <button class="btn" onclick="printPropertyCard('${a.id}')">Property Card</button>
+      ${a.status === "active" ? `<button class="btn" onclick="openTransferModal('${a.id}')">Transfer</button>` : ""}
       ${a.status === "active" ? `<button class="btn" onclick="openRevalueModal('${a.id}')">Revalue</button>` : ""}
       <button class="btn primary" onclick="openAssetModal('${a.id}')">Edit</button>
     </div>
   `);
+  renderAssetQr(a);
+}
+/** Renders a small on-screen QR into the asset-detail modal's #assetQrBox, encoding enough to
+ *  identify the physical item from a scan (property tag + description). Uses the qrcodejs UMD
+ *  library loaded from cdnjs in index.html; degrades to a placeholder if it isn't available
+ *  (e.g. blocked network) rather than throwing. */
+function renderAssetQr(a) {
+  const box = document.getElementById("assetQrBox");
+  if (!box) return;
+  const payload = `PPE Ledger\nProperty ID: ${a.property_id || "—"}\n${a.account_name || ""}\n${a.description || ""}`;
+  if (typeof QRCode === "undefined") {
+    box.innerHTML = '<div class="subtle" style="font-size:9px;padding:4px;">QR unavailable offline</div>';
+    return;
+  }
+  try {
+    box.innerHTML = "";
+    new QRCode(box, { text: payload, width: 96, height: 96, correctLevel: QRCode.CorrectLevel.M });
+  } catch (e) { console.error(e); }
+}
+async function removeAssetPhoto(id) {
+  const a = S.assets.get(id);
+  if (!a || !a.photo_url) return;
+  if (!confirm("Remove this photo?")) return;
+  await deleteFile(a.photo_path);
+  await S.db.collection("assets").doc(id).update({ photo_url: null, photo_path: null, updated_by: viewerLabel(), updated_at: new Date().toISOString() });
+  toast("Photo removed.");
+  openAssetDetail(id);
+}
+async function removeAssetDocument(id) {
+  const a = S.assets.get(id);
+  if (!a || !a.document_url) return;
+  if (!confirm("Remove this document?")) return;
+  await deleteFile(a.document_path);
+  await S.db.collection("assets").doc(id).update({ document_url: null, document_path: null, document_name: null, updated_by: viewerLabel(), updated_at: new Date().toISOString() });
+  toast("Document removed.");
+  openAssetDetail(id);
+}
+/** Prints a small standalone QR + property-ID tag, sized for a sticker label, in its own window. */
+function printAssetIdTag(id) {
+  const a = S.assets.get(id);
+  if (!a) return;
+  const payload = `PPE Ledger\nProperty ID: ${a.property_id || "—"}\n${a.account_name || ""}\n${a.description || ""}`;
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Asset ID Tag</title>
+    <style>
+      @page { size: 3in 2in; margin: 0.1in; }
+      body { font-family: Arial, sans-serif; text-align: center; }
+      #tag { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #000; padding: 6px 10px; }
+      #qr { width: 90px; height: 90px; }
+      .info { text-align: left; font-size: 10px; max-width: 140px; }
+      .no-print { margin: 12px; }
+      @media print { .no-print { display: none !important; } }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"><\/script>
+    </head><body>
+    <div class="no-print"><button onclick="window.print()">Print</button> <button onclick="window.close()">Close</button></div>
+    <div id="tag"><div id="qr"></div><div class="info"><b>${esc(a.property_id) || ""}</b><br>${esc(a.account_name)}<br>${esc(a.description) || ""}</div></div>
+    <script>
+      window.addEventListener('load', function(){
+        if (typeof QRCode !== 'undefined') { new QRCode(document.getElementById('qr'), { text: ${JSON.stringify(payload)}, width: 90, height: 90 }); }
+      });
+    <\/script>
+    </body></html>`;
+  openPrintWindow("Asset ID Tag", html);
 }
 
 function openRevalueModal(id) {
@@ -714,6 +908,71 @@ async function revalueAsset(id) {
       updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     });
     toast("Revaluation saved.");
+    closeModal();
+  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+}
+
+/* ---------- Transfer history (location / accountable-officer changes) ----------
+   Modeled directly on openRevalueModal/revalueAsset above: appends an audit-trail entry to an
+   array field on the asset doc (here, `transfers`) rather than overwriting history, and the new
+   location/officer become the asset's current values going forward. */
+function openTransferModal(id) {
+  const a = S.assets.get(id);
+  if (!a) return;
+  openModal(`
+    <div class="modal-head"><h3>Transfer asset</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="margin-top:0;">${esc(a.account_name)} ${a.property_id ? "— " + esc(a.property_id) : ""}</p>
+      <p class="subtle" style="font-size:12.5px;">Use this to record a change in location and/or the accountable officer/custodian — the old values stay on record below.</p>
+      <div class="kv" style="margin-bottom:14px;">
+        <dt>Current location</dt><dd>${esc(a.location) || "—"}</dd>
+        <dt>Current accountable officer</dt><dd>${esc(a.accountable_officer) || "—"}</dd>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>New location / office</label><input id="tr_location" value="${esc(a.location)}"></div>
+        <div class="field"><label>New accountable officer</label><input id="tr_officer" value="${esc(a.accountable_officer)}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Effective date</label><input type="date" id="tr_date" value="${new Date().toISOString().slice(0, 10)}"></div>
+        <div class="field"><label>Reason / reference</label><input id="tr_reason" placeholder="e.g. Reassigned to Engineering Office"></div>
+      </div>
+      ${a.transfers && a.transfers.length ? `
+        <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+        <label style="margin-bottom:6px;">Transfer history</label>
+        <div class="kv" style="font-size:12.5px;grid-template-columns:110px 1fr;">
+          ${a.transfers.slice().reverse().map(t => `<dt class="mono">${fmtDate(t.date)}</dt><dd>${esc(t.old_location || "—")} &rarr; ${esc(t.new_location || "—")}${t.new_accountable_officer !== t.old_accountable_officer ? `, ${esc(t.old_accountable_officer || "—")} &rarr; ${esc(t.new_accountable_officer || "—")}` : ""}${t.reason ? " — " + esc(t.reason) : ""} <span class="subtle">(${esc(t.by || "")})</span></dd>`).join("")}
+        </div>
+      ` : ""}
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="transferAsset('${a.id}')">Save transfer</button>
+    </div>
+  `);
+}
+
+async function transferAsset(id) {
+  if (!S.db) return toast("No shared database in this view.");
+  const a = S.assets.get(id);
+  if (!a) return;
+  const newLocation = document.getElementById("tr_location").value.trim();
+  const newOfficer = document.getElementById("tr_officer").value.trim();
+  const date = document.getElementById("tr_date").value || new Date().toISOString().slice(0, 10);
+  const reason = document.getElementById("tr_reason").value.trim();
+  if (!newLocation && !newOfficer) return toast("Enter a new location or accountable officer.");
+  if (newLocation === (a.location || "") && newOfficer === (a.accountable_officer || "")) return toast("No change to save.");
+  const entry = {
+    date, old_location: a.location || "", new_location: newLocation || a.location || "",
+    old_accountable_officer: a.accountable_officer || "", new_accountable_officer: newOfficer || a.accountable_officer || "",
+    reason, by: viewerLabel(), at: new Date().toISOString(),
+  };
+  const transfers = [...(a.transfers || []), entry];
+  try {
+    await S.db.collection("assets").doc(id).update({
+      location: entry.new_location, accountable_officer: entry.new_accountable_officer, transfers,
+      updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+    });
+    toast("Transfer saved.");
     closeModal();
   } catch (e) { console.error(e); toast("Couldn't save — try again."); }
 }
@@ -1140,6 +1399,505 @@ function exportRetiredCsv() {
 }
 
 /* ============================================================
+   RENDER: Construction in Progress (CIP)
+   Tracked in its own collection (cip_projects), separate from the Asset Register — each
+   project accumulates multiple contractor billings over the life of a project (own model:
+   project header + billings[] array, analogous to how revaluations/transfers are arrays on an
+   asset doc) until "Complete → transfer to PPE" capitalizes it into a regular asset. The 3 CIP
+   account codes still reconcile against the Trial Balance — see registryCostFor/
+   distinctCostAccounts above — so nothing about Reconciliation needs to change from here.
+   ============================================================ */
+function cipAccountOptions(selectedCode) {
+  return CIP_ACCOUNT_CODES.map(code => {
+    const info = accountInfo(code);
+    return `<option value="${code}" ${code === selectedCode ? "selected" : ""}>${code} — ${esc(info.name)}</option>`;
+  }).join("");
+}
+function cipProjectsFiltered(f) {
+  let rows = cipProjectsInFund(S.currentFund);
+  if (f.status !== "all") rows = rows.filter(p => (p.status || "in_progress") === f.status);
+  if (f.q) {
+    const q = f.q.toLowerCase();
+    rows = rows.filter(p => [p.cip_code, p.name, p.contractor, p.location].some(v => (v || "").toLowerCase().includes(q)));
+  }
+  return rows.sort((a, b) => (a.cip_code || "").localeCompare(b.cip_code || ""));
+}
+function renderCip() {
+  const el = document.getElementById("view-cip");
+  if (!el) return; // older index.html without the CIP nav tab/container — nothing to render into
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const f = S.cipFilter;
+  const rows = cipProjectsFiltered(f);
+  el.innerHTML = `
+    <div class="banner info" style="margin-bottom:14px;">Construction in Progress is tracked separately from the Asset Register. Each project's account code still counts toward Reconciliation until it's completed and transferred into a PPE asset.</div>
+    <div class="panel">
+      <div class="toolbar">
+        <input type="text" class="grow" id="cipSearch" placeholder="Search CIP code, project name, contractor, location…" value="${esc(f.q)}">
+        <select id="cipStatus">
+          <option value="in_progress" ${f.status === "in_progress" ? "selected" : ""}>In progress</option>
+          <option value="completed" ${f.status === "completed" ? "selected" : ""}>Completed / transferred</option>
+          <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
+        </select>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="exportCipCsv()">Download CSV</button>
+        <button class="btn" onclick="printCipLedgerCardsBulk()">Print Ledger Cards</button>
+        <button class="btn" onclick="openCipBulkImportModal()">Bulk import (paste)</button>
+        <button class="btn primary" onclick="openCipProjectModal()">+ New project</button>
+      </div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>CIP No.</th><th>Account</th><th>Name of Project</th><th>Contractor</th><th class="num">Total to date</th><th>Status</th></tr></thead>
+        <tbody>${rows.length ? rows.map(p => `
+          <tr class="clickable" onclick="openCipDetail('${p.id}')">
+            <td class="mono">${esc(p.cip_code) || "—"}</td>
+            <td>${formatAccountCode(p.account_code)}</td>
+            <td class="truncate" title="${esc(p.name)}">${esc(p.name) || "—"}</td>
+            <td class="truncate">${esc(p.contractor) || "—"}</td>
+            <td class="num mono">${fmtMoney(cipProjectTotal(p))}</td>
+            <td>${p.status === "completed" ? '<span class="pill neutral">Completed</span>' : '<span class="pill good">In progress</span>'}</td>
+          </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No CIP projects match these filters.</div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>
+  `;
+  document.getElementById("cipSearch").addEventListener("input", e => { S.cipFilter.q = e.target.value; renderCip(); });
+  document.getElementById("cipStatus").addEventListener("change", e => { S.cipFilter.status = e.target.value; renderCip(); });
+}
+function exportCipCsv() {
+  const rows = cipProjectsFiltered(S.cipFilter);
+  const out = [["Fund", "CIP No.", "Account Code", "Account Name", "Name of Project", "Location", "Contractor", "Contract Period", "Project Cost", "Total Billed to Date", "Status"]];
+  rows.forEach(p => out.push([fundLabel(p.fund || "GF"), p.cip_code || "", p.account_code || "", p.account_name || "", p.name || "",
+    p.location || "", p.contractor || "", p.contract_period || "", (p.project_cost || 0).toFixed(2), cipProjectTotal(p).toFixed(2), p.status || "in_progress"]));
+  const csv = out.map(r => r.map(csvField).join(",")).join("\n");
+  browserDownload(`CIP_Projects_${S.currentFund}_${new Date().toISOString().slice(0, 10)}.csv`, csv, "text/csv;charset=utf-8;");
+  toast("Saved.");
+}
+
+function openCipProjectModal(existingId) {
+  const p = existingId ? S.cipProjects.get(existingId) : null;
+  openModal(`
+    <div class="modal-head"><h3>${p ? "Edit CIP project" : "New CIP project"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="fieldrow">
+        <div class="field"><label>Fund</label>
+          <select id="c_fund">${FUNDS.map(fu => `<option value="${fu.code}" ${(p ? (p.fund || "GF") : S.currentFund) === fu.code ? "selected" : ""}>${esc(fu.label)}</option>`).join("")}</select></div>
+        <div class="field"><label>Account Code</label><select id="c_account">${cipAccountOptions(p ? p.account_code : CIP_ACCOUNT_CODES[0])}</select></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>CIP No.</label><input id="c_code" value="${esc(p ? p.cip_code : "")}" placeholder="e.g. 2020-020-06"></div>
+        <div class="field"><label>Contractor</label><input id="c_contractor" value="${esc(p ? p.contractor : "")}"></div>
+      </div>
+      <div class="field"><label>Name of Project</label><textarea id="c_name" rows="2">${esc(p ? p.name : "")}</textarea></div>
+      <div class="field"><label>Location / Office</label><input id="c_location" value="${esc(p ? p.location : "")}"></div>
+      <div class="fieldrow">
+        <div class="field"><label>Contract Period</label><input id="c_period" value="${esc(p ? p.contract_period : "")}" placeholder="e.g. 180 calendar days"></div>
+        <div class="field"><label>Project Cost (Php)</label><input type="number" step="0.01" id="c_cost" value="${p ? p.project_cost || "" : ""}" placeholder="Contract award amount"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="saveCipProject(${p ? `'${p.id}'` : "null"})">${p ? "Save changes" : "Create project"}</button>
+    </div>
+  `);
+}
+async function saveCipProject(existingId) {
+  if (!S.db) return toast("No shared database in this view.");
+  const code = document.getElementById("c_code").value.trim();
+  const name = document.getElementById("c_name").value.trim();
+  if (!code) return toast("Enter a CIP No.");
+  const rec = {
+    fund: document.getElementById("c_fund").value,
+    account_code: Number(document.getElementById("c_account").value),
+    account_name: accountInfo(Number(document.getElementById("c_account").value)).name,
+    cip_code: code, name,
+    location: document.getElementById("c_location").value.trim(),
+    contractor: document.getElementById("c_contractor").value.trim(),
+    contract_period: document.getElementById("c_period").value.trim(),
+    project_cost: round2(Number(document.getElementById("c_cost").value) || 0),
+    updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+  };
+  try {
+    if (existingId) {
+      await S.db.collection("cip_projects").doc(existingId).update(rec);
+      toast("Project updated.");
+    } else {
+      rec.status = "in_progress";
+      rec.billings = [];
+      rec.created_by = viewerLabel(); rec.created_at = new Date().toISOString();
+      await S.db.collection("cip_projects").add(rec);
+      toast("CIP project created.");
+    }
+    closeModal();
+  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+}
+
+function openCipDetail(id) {
+  const p = S.cipProjects.get(id);
+  if (!p) return;
+  const billings = p.billings || [];
+  const total = cipProjectTotal(p);
+  const isCompleted = p.status === "completed";
+  openModal(`
+    <div class="modal-head"><h3>${esc(p.cip_code) || "CIP Project"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="margin-top:0;">${esc(p.name) || "<span class=subtle>No project name</span>"}</p>
+      <div class="kv">
+        <dt>Fund</dt><dd>${esc(fundLabel(p.fund || "GF"))}</dd>
+        <dt>Account</dt><dd>${esc(p.account_name)} <span class="mono subtle">(${formatAccountCode(p.account_code)})</span></dd>
+        <dt>Location</dt><dd>${esc(p.location) || "—"}</dd>
+        <dt>Contractor</dt><dd>${esc(p.contractor) || "—"}</dd>
+        <dt>Contract Period</dt><dd>${esc(p.contract_period) || "—"}</dd>
+        <dt>Project Cost</dt><dd class="mono">${p.project_cost ? fmtMoney(p.project_cost) : "—"}</dd>
+        <dt>Total billed to date</dt><dd class="mono">${fmtMoney(total)}</dd>
+        <dt>Status</dt><dd>${isCompleted ? '<span class="pill neutral">Completed</span>' : '<span class="pill good">In progress</span>'}</dd>
+      </div>
+      ${isCompleted ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">Transferred to the Asset Register ${fmtDate(p.transferred_at ? p.transferred_at.slice(0, 10) : "")}${p.transferred_by ? " by " + esc(p.transferred_by) : ""}. <a href="#" onclick="closeModal();openAssetDetail('${p.transferred_asset_id}');return false;">View the asset →</a></p>` : ""}
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+        <label style="margin:0;">Billings</label>
+        ${!isCompleted ? `<button class="btn small" onclick="openCipBillingModal('${p.id}')">+ Add billing</button>` : ""}
+      </div>
+      <div class="tablewrap"><table style="font-size:12px;">
+        <thead><tr><th>Date</th><th>Ref.</th><th>Particulars</th><th class="num">Total</th>${!isCompleted ? "<th></th>" : ""}</tr></thead>
+        <tbody>${billings.length ? billings.map((b, i) => `
+          <tr>
+            <td class="mono">${fmtDate(b.date)}</td>
+            <td>${esc(b.ref)}</td>
+            <td class="truncate" title="${esc(b.particulars)}">${esc(b.particulars) || "—"}</td>
+            <td class="num mono">${fmtMoney(cipBillingTotal(b))}</td>
+            ${!isCompleted ? `<td><button class="btn small ghost" onclick="openCipBillingModal('${p.id}', ${i})">Edit</button></td>` : ""}
+          </tr>`).join("") : `<tr><td colspan="${isCompleted ? 4 : 5}"><div class="empty">No billings recorded yet.</div></td></tr>`}
+        </tbody>
+      </table></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Close</button>
+      <button class="btn" onclick="printCipLedgerCard('${p.id}')">Ledger Card</button>
+      ${!isCompleted ? `<button class="btn" onclick="openCipProjectModal('${p.id}')">Edit</button>` : ""}
+      ${!isCompleted ? `<button class="btn primary" onclick="openCipCompleteModal('${p.id}')">Complete → transfer to PPE</button>` : ""}
+    </div>
+  `);
+}
+
+function openCipBillingModal(projectId, index) {
+  const p = S.cipProjects.get(projectId);
+  if (!p) return;
+  const b = index != null ? (p.billings || [])[index] : null;
+  openModal(`
+    <div class="modal-head"><h3>${b ? "Edit billing" : "Add billing"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="fieldrow">
+        <div class="field"><label>Transaction date</label><input type="date" id="b_date" value="${b ? b.date || "" : new Date().toISOString().slice(0, 10)}"></div>
+        <div class="field"><label>Billing / DV reference</label><input id="b_ref" value="${esc(b ? b.ref : "")}" placeholder="e.g. 1ST BILLING"></div>
+      </div>
+      <div class="field"><label>Particulars</label><textarea id="b_particulars" rows="2">${esc(b ? b.particulars : "")}</textarea></div>
+      <div class="fieldrow3">
+        <div class="field"><label>Cost — By Contract (Php)</label><input type="number" step="0.01" id="b_contract" value="${b ? b.by_contract || "" : ""}"></div>
+        <div class="field"><label>Direct Materials (Php)</label><input type="number" step="0.01" id="b_materials" value="${b ? b.admin_materials || "" : ""}"></div>
+        <div class="field"><label>Direct Labor (Php)</label><input type="number" step="0.01" id="b_labor" value="${b ? b.admin_labor || "" : ""}"></div>
+      </div>
+      <div class="fieldrow3">
+        <div class="field"><label>Overhead (Php)</label><input type="number" step="0.01" id="b_overhead" value="${b ? b.admin_overhead || "" : ""}"></div>
+        <div class="field"><label>Consultancy (Php)</label><input type="number" step="0.01" id="b_consultancy" value="${b ? b.admin_consultancy || "" : ""}"></div>
+        <div class="field"><label>Others (Php)</label><input type="number" step="0.01" id="b_others" value="${b ? b.admin_others || "" : ""}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Transfers / Adjustments (Php)</label><input type="number" step="0.01" id="b_adjust" value="${b ? b.transfers_adjustments || "" : ""}"></div>
+        <div class="field"><label>Remarks</label><input id="b_remarks" value="${esc(b ? b.remarks : "")}"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      ${b ? `<button class="btn danger" style="margin-right:auto" onclick="deleteCipBilling('${p.id}', ${index})">Delete</button>` : ""}
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="saveCipBilling('${p.id}', ${index != null ? index : "null"})">${b ? "Save changes" : "Add billing"}</button>
+    </div>
+  `);
+}
+async function saveCipBilling(projectId, index) {
+  if (!S.db) return toast("No shared database in this view.");
+  const p = S.cipProjects.get(projectId);
+  if (!p) return;
+  const entry = {
+    date: document.getElementById("b_date").value || new Date().toISOString().slice(0, 10),
+    ref: document.getElementById("b_ref").value.trim(),
+    particulars: document.getElementById("b_particulars").value.trim(),
+    by_contract: round2(Number(document.getElementById("b_contract").value) || 0),
+    admin_materials: round2(Number(document.getElementById("b_materials").value) || 0),
+    admin_labor: round2(Number(document.getElementById("b_labor").value) || 0),
+    admin_overhead: round2(Number(document.getElementById("b_overhead").value) || 0),
+    admin_consultancy: round2(Number(document.getElementById("b_consultancy").value) || 0),
+    admin_others: round2(Number(document.getElementById("b_others").value) || 0),
+    transfers_adjustments: round2(Number(document.getElementById("b_adjust").value) || 0),
+    remarks: document.getElementById("b_remarks").value.trim(),
+    by: viewerLabel(), at: new Date().toISOString(),
+  };
+  const billings = [...(p.billings || [])];
+  if (index != null && index >= 0 && index < billings.length) billings[index] = entry; else billings.push(entry);
+  try {
+    await S.db.collection("cip_projects").doc(projectId).update({ billings, updated_by: viewerLabel(), updated_at: new Date().toISOString() });
+    toast("Billing saved.");
+    openCipDetail(projectId);
+  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+}
+async function deleteCipBilling(projectId, index) {
+  const p = S.cipProjects.get(projectId);
+  if (!p) return;
+  if (!confirm("Delete this billing entry?")) return;
+  const billings = (p.billings || []).filter((_, i) => i !== index);
+  await S.db.collection("cip_projects").doc(projectId).update({ billings, updated_by: viewerLabel(), updated_at: new Date().toISOString() });
+  toast("Billing deleted.");
+  openCipDetail(projectId);
+}
+
+/** Default target PPE category to suggest when a CIP project is completed — the CIP account's
+ *  own "Other …" category in the same class, matching what most of these projects actually turn
+ *  into; always changeable in the Complete modal before confirming. */
+function defaultTransferAccountFor(cipCode) {
+  if (cipCode === 10710010) return 10702990; // Other Land Improvements
+  if (cipCode === 10710020) return 10703990; // Other Infrastructure Assets
+  if (cipCode === 10710030) return 10704990; // Other Structures
+  return 10799990;
+}
+function openCipCompleteModal(id) {
+  const p = S.cipProjects.get(id);
+  if (!p) return;
+  const total = cipProjectTotal(p);
+  openModal(`
+    <div class="modal-head"><h3>Complete CIP project → transfer to PPE</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="margin-top:0;">${esc(p.name) || esc(p.cip_code)}</p>
+      <p class="subtle" style="font-size:12.5px;">This creates a new PPE asset for the total ${fmtMoney(total)} billed to date, and marks this CIP project completed. This can't be undone from here — check the details below first.</p>
+      <div class="field"><label>New asset category</label><select id="ct_account">${assetCategoryOptions(defaultTransferAccountFor(p.account_code))}</select></div>
+      <div class="fieldrow">
+        <div class="field"><label>Property / Tag No.</label><input id="ct_propid"></div>
+        <div class="field"><label>Date completed / transferred</label><input type="date" id="ct_date" value="${new Date().toISOString().slice(0, 10)}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Location / Office</label><input id="ct_location" value="${esc(p.location)}"></div>
+        <div class="field"><label>Accountable officer</label><input id="ct_officer"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="ct_life" value="25"></div>
+        <div class="field"><label>5% Residual value (Php)</label><input type="number" step="0.01" id="ct_residual" value="${round2(total * 0.05)}"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="completeCipProject('${p.id}')">Confirm — capitalize as PPE</button>
+    </div>
+  `);
+}
+async function completeCipProject(id) {
+  if (!S.db) return toast("No shared database in this view.");
+  const p = S.cipProjects.get(id);
+  if (!p) return;
+  const total = cipProjectTotal(p);
+  if (total <= 0) return toast("This project has no billings to capitalize yet.");
+  const code = Number(document.getElementById("ct_account").value);
+  const info = accountInfo(code);
+  const date = document.getElementById("ct_date").value || new Date().toISOString().slice(0, 10);
+  try {
+    const ref = await S.db.collection("assets").add({
+      fund: p.fund || "GF",
+      account_code: code, account_name: info.name, ad_account_code: code + 1,
+      dep_exp_account_code: info.expCode, dep_exp_account_name: info.expName,
+      property_id: document.getElementById("ct_propid").value.trim(),
+      date_acquired: date,
+      description: p.name || "",
+      location: document.getElementById("ct_location").value.trim(),
+      accountable_officer: document.getElementById("ct_officer").value.trim(),
+      remarks: `Transferred from CIP ${p.cip_code || ""}`.trim(),
+      acquisition_type: "purchased", acquisition_source: "",
+      cost: total, residual_value: round2(Number(document.getElementById("ct_residual").value) || 0),
+      useful_life_years: Number(document.getElementById("ct_life").value) || 0,
+      depreciable: !!info.depreciable, status: "active", accum_depr_baseline: 0,
+      source_sheet: `Transferred from CIP ${p.cip_code || ""}`.trim(),
+      updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+    });
+    await S.db.collection("cip_projects").doc(id).update({
+      status: "completed", transferred_asset_id: ref.id, transferred_at: new Date().toISOString(), transferred_by: viewerLabel(),
+      date_completed: date,
+    });
+    toast("CIP project completed and transferred to the Asset Register.");
+    closeModal();
+  } catch (e) { console.error(e); toast("Couldn't complete — try again."); }
+}
+
+/** The printable Construction in Progress Ledger Card, matching the client's paper form: seal +
+ *  title, then Name of Project/Account Code/Contractor/CIP No./Contract Period/Project Cost, then
+ *  a billings table with By Contract / By Administration (5 sub-columns) / Total Balance
+ *  (running cumulative) / Transfers-Adjustments — the same columns the source CIP spreadsheet
+ *  uses, so client staff see a familiar layout. */
+function cipLedgerCardHtml(p) {
+  const billings = p.billings || [];
+  let runningTotal = 0;
+  const rows = billings.map(b => { runningTotal = round2(runningTotal + cipBillingTotal(b)); return { ...b, runningTotal }; });
+  const blankRows = Math.max(0, 10 - rows.length);
+  return `
+    <div class="card">
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : `<div style="width:56px;"></div>`}
+        <div class="titles"><h1>CONSTRUCTION IN PROGRESS LEDGER CARD</h1></div>
+        <div class="fund">Fund:<br><b>${esc(fundLabel(p.fund || "GF"))}</b></div>
+      </div>
+      <table class="info">
+        <tr>
+          <td class="label">Name of Project:</td><td>${esc(p.name) || "—"}</td>
+          <td class="label">Account Code:</td><td class="acct-box">${formatAccountCode(p.account_code)}</td>
+        </tr>
+        <tr>
+          <td class="label">Contractor:</td><td>${esc(p.contractor) || "—"}</td>
+          <td class="label">CIP No.:</td><td>${esc(p.cip_code) || "—"}</td>
+        </tr>
+        <tr>
+          <td class="label">Contract Period:</td><td>${esc(p.contract_period) || "—"}</td>
+          <td class="label">Project Cost:</td><td>${p.project_cost ? fmtNum(p.project_cost) : "—"}</td>
+        </tr>
+      </table>
+      <table class="data">
+        <thead><tr>
+          <th rowspan="2" style="width:7%">Date</th><th rowspan="2" style="width:8%">Ref.</th><th rowspan="2" style="width:20%">Particulars</th>
+          <th rowspan="2" style="width:9%">Costs By Contract</th>
+          <th colspan="5">Costs By Administration</th>
+          <th rowspan="2" style="width:9%">Total Balance</th><th rowspan="2" style="width:9%">Transfers/<br>Adjustments</th>
+        </tr>
+        <tr>
+          <th style="width:7%">Direct Materials</th><th style="width:7%">Direct Labor</th><th style="width:7%">Overhead</th><th style="width:7%">Consultancy</th><th style="width:7%">Others</th>
+        </tr></thead>
+        <tbody>
+          ${rows.map(r => `<tr>
+            <td>${fmtDateShort(r.date)}</td>
+            <td>${esc(r.ref)}</td>
+            <td>${esc(r.particulars)}</td>
+            <td class="num">${r.by_contract ? fmtNum(r.by_contract) : ""}</td>
+            <td class="num">${r.admin_materials ? fmtNum(r.admin_materials) : ""}</td>
+            <td class="num">${r.admin_labor ? fmtNum(r.admin_labor) : ""}</td>
+            <td class="num">${r.admin_overhead ? fmtNum(r.admin_overhead) : ""}</td>
+            <td class="num">${r.admin_consultancy ? fmtNum(r.admin_consultancy) : ""}</td>
+            <td class="num">${r.admin_others ? fmtNum(r.admin_others) : ""}</td>
+            <td class="num">${fmtNum(r.runningTotal)}</td>
+            <td class="num">${r.transfers_adjustments ? fmtNum(r.transfers_adjustments) : ""}</td>
+          </tr>`).join("")}
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+function printCipLedgerCard(id) {
+  const p = S.cipProjects.get(id);
+  if (!p) return;
+  openPrintWindow("Construction in Progress Ledger Card", printCardsHtml("Construction in Progress Ledger Card", cipLedgerCardHtml(p)));
+}
+function printCipLedgerCardsBulk() {
+  const rows = cipProjectsFiltered(S.cipFilter);
+  if (!rows.length) return toast("No CIP projects match the current filters.");
+  openPrintWindow("Construction in Progress Ledger Cards", printCardsHtml("Construction in Progress Ledger Cards", rows.map(cipLedgerCardHtml).join("")));
+}
+
+/* ---------- Bulk import CIP billings (paste) ----------
+   Lets the client paste their existing CIP spreadsheet in one go instead of hand-entering every
+   historical billing — grouped into projects by (fund, account code, CIP No.), creating a new
+   project doc the first time a CIP No. is seen and appending a billing to it otherwise. Mirrors
+   openBulkAddModal/submitBulkAdd's paste-or-upload pattern for the Asset Register. */
+function openCipBulkImportModal() {
+  openModal(`
+    <div class="modal-head"><h3>Bulk import CIP billings</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p class="subtle">These will be added to <b>${esc(fundLabel(S.currentFund))}</b> — switch funds in the sidebar first if that's not right. Rows sharing the same CIP No. are grouped into one project; a project not seen before is created automatically.</p>
+      <p class="subtle">Upload a CSV file, or paste rows — one billing per line, columns in this order:</p>
+      <p class="mono subtle" style="font-size:11px;">account_code, cip_code, project_name, location, contractor, date (M/D/YYYY or YYYY-MM-DD), ref, by_contract, admin_materials, admin_labor, admin_overhead, admin_consultancy, admin_others, transfers_adjustments, remarks</p>
+      <div class="field" style="margin-top:10px;">
+        <label>CSV file</label>
+        <input type="file" id="cipBulkFile" accept=".csv,text/csv">
+      </div>
+      <p class="subtle" style="font-size:12px;margin:10px 0 6px;">— or paste directly —</p>
+      <div class="field"><textarea id="cipBulkPaste" rows="7"></textarea></div>
+      <div id="cipBulkPreview" class="subtle" style="font-size:12px;"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="submitCipBulkImport()">Import all</button>
+    </div>
+  `);
+  const textarea = document.getElementById("cipBulkPaste");
+  const preview = () => {
+    const rows = parseCipBulkRows(textarea.value);
+    document.getElementById("cipBulkPreview").textContent = rows.length ? `${rows.length} billing row(s) recognized.` : textarea.value.trim() ? "No valid rows recognized yet." : "";
+  };
+  textarea.addEventListener("input", preview);
+  document.getElementById("cipBulkFile").addEventListener("change", e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let text = String(reader.result || "");
+      if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+      textarea.value = text;
+      preview();
+      toast(`Loaded ${file.name}.`);
+    };
+    reader.onerror = () => toast("Couldn't read that file.");
+    reader.readAsText(file);
+  });
+}
+function parseCipBulkRows(text) {
+  return text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(line => {
+    return line.includes("\t") ? line.split("\t").map(c => c.trim()) : parseCsvLine(line);
+  }).filter(cols => cols.length >= 8 && Number(cols[0]) && cols[1]);
+}
+function parseFlexibleDate(s) {
+  s = (s || "").trim();
+  if (!s) return new Date().toISOString().slice(0, 10);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  const m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return `${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`;
+  return s;
+}
+async function submitCipBulkImport() {
+  if (!S.db) return toast("No shared database in this view.");
+  const rows = parseCipBulkRows(document.getElementById("cipBulkPaste").value);
+  if (!rows.length) return toast("No valid rows found.");
+  // Stage into existing/new project buckets first, then write once per project — so 40+ billing
+  // rows for the same project become one array update, not one write per row.
+  const fund = S.currentFund;
+  const buckets = new Map(); // key "code|cipcode" -> { existingDoc?, rec, newBillings[] }
+  cipProjectsInFund(fund).forEach(p => buckets.set(`${p.account_code}|${p.cip_code}`, { existingId: p.id, existing: p, newBillings: [] }));
+  let recognized = 0;
+  for (const cols of rows) {
+    const [code, cipCode, name, location, contractor, date, ref, byContract, materials, labor, overhead, consultancy, others, adjust, remarks] = cols;
+    const info = accountInfo(Number(code));
+    const key = `${Number(code)}|${cipCode}`;
+    if (!buckets.has(key)) buckets.set(key, { newBillings: [], rec: { fund, account_code: Number(code), account_name: info.name, cip_code: cipCode, name: name || "", location: location || "", contractor: contractor || "" } });
+    const bucket = buckets.get(key);
+    if (bucket.rec && name && !bucket.rec.name) bucket.rec.name = name;
+    bucket.newBillings.push({
+      date: parseFlexibleDate(date), ref: ref || "", particulars: name || "",
+      by_contract: round2(Number(byContract) || 0), admin_materials: round2(Number(materials) || 0),
+      admin_labor: round2(Number(labor) || 0), admin_overhead: round2(Number(overhead) || 0),
+      admin_consultancy: round2(Number(consultancy) || 0), admin_others: round2(Number(others) || 0),
+      transfers_adjustments: round2(Number(adjust) || 0), remarks: remarks || "",
+      by: viewerLabel(), at: new Date().toISOString(),
+    });
+    recognized++;
+  }
+  let projectsTouched = 0;
+  for (const [, bucket] of buckets) {
+    if (!bucket.newBillings.length) continue;
+    projectsTouched++;
+    if (bucket.existingId) {
+      const billings = [...(bucket.existing.billings || []), ...bucket.newBillings];
+      await S.db.collection("cip_projects").doc(bucket.existingId).update({ billings, updated_by: viewerLabel(), updated_at: new Date().toISOString() });
+    } else {
+      await S.db.collection("cip_projects").add({
+        ...bucket.rec, status: "in_progress", contract_period: "", project_cost: 0,
+        billings: bucket.newBillings, created_by: viewerLabel(), created_at: new Date().toISOString(),
+      });
+    }
+  }
+  toast(`${recognized} billing(s) imported across ${projectsTouched} project(s).`);
+  closeModal();
+}
+
+/* ============================================================
    PRINTABLE REPORTS — COA-style Equipment Ledger Card & Property Card,
    one per asset. Opens a dedicated print window with its own stylesheet
    (kept separate from the app's own design system so the layout can match
@@ -1167,9 +1925,12 @@ function fmtDateShort(iso) {
  */
 function assetEventTimeline(asset) {
   const events = [];
+  const acqNote = asset.acquisition_type && asset.acquisition_type !== "purchased"
+    ? acquisitionTypeLabel(asset.acquisition_type) + (asset.acquisition_source ? " — " + asset.acquisition_source : "")
+    : "";
   events.push({
     date: asset.date_acquired || "", kind: "acquire",
-    label: "Acquisition", reference: asset.remarks || "",
+    label: "Acquisition", reference: [asset.remarks, acqNote].filter(Boolean).join(" — "),
   });
   if (asset.accum_depr_baseline) {
     events.push({
@@ -1181,6 +1942,18 @@ function assetEventTimeline(asset) {
     events.push({
       date: r.date, kind: "revalue", label: `Revaluation${r.reason ? " — " + r.reason : ""}`,
       reference: "", newCost: r.new_cost,
+    });
+  });
+  (asset.transfers || []).forEach(t => {
+    const changedLocation = t.new_location && t.new_location !== t.old_location;
+    const changedOfficer = t.new_accountable_officer && t.new_accountable_officer !== t.old_accountable_officer;
+    const parts = [];
+    if (changedLocation) parts.push(`to ${t.new_location}`);
+    if (changedOfficer) parts.push(`to ${t.new_accountable_officer}`);
+    events.push({
+      date: t.date, kind: "transfer",
+      label: `Transfer${parts.length ? " — " + parts.join(", ") : ""}${t.reason ? " (" + t.reason + ")" : ""}`,
+      reference: t.reason || "", newLocation: t.new_location, newOfficer: t.new_accountable_officer,
     });
   });
   if (asset.depreciable) {
@@ -1300,7 +2073,7 @@ function ledgerCardCardHtml(asset) {
     </div>`;
 }
 function propertyCardCardHtml(asset) {
-  const rows = assetEventTimeline(asset).filter(r => r.kind === "acquire" || r.kind === "retire" || r.kind === "revalue");
+  const rows = assetEventTimeline(asset).filter(r => r.kind === "acquire" || r.kind === "retire" || r.kind === "revalue" || r.kind === "transfer");
   const blankRows = Math.max(0, 12 - rows.length);
   return `
     <div class="card">
@@ -1327,15 +2100,16 @@ function propertyCardCardHtml(asset) {
           ${rows.map(r => {
             const isReceipt = r.kind === "acquire";
             const isDisposal = r.kind === "retire";
+            const isTransfer = r.kind === "transfer";
             return `<tr>
               <td>${fmtDateShort(r.date)}</td>
               <td>${esc(r.reference)}</td>
               <td class="num">${isReceipt ? "1" : ""}</td>
-              <td class="num">${isDisposal ? "1" : ""}</td>
-              <td>${isDisposal ? esc(asset.accountable_officer) : ""}</td>
+              <td class="num">${isDisposal || isTransfer ? "1" : ""}</td>
+              <td>${isDisposal ? esc(asset.accountable_officer) : isTransfer ? esc(r.newOfficer || r.newLocation || "") : ""}</td>
               <td class="num">${isDisposal ? "0" : "1"}</td>
               <td class="num">${fmtNum(r.cost)}</td>
-              <td>${r.kind === "revalue" ? "Revalued" : ""}</td>
+              <td>${r.kind === "revalue" ? "Revalued" : isTransfer ? "Transferred" : ""}</td>
             </tr>`;
           }).join("")}
           ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
@@ -1445,6 +2219,7 @@ function renderAll() {
   renderReconciliation();
   renderRetired();
   renderReports();
+  renderCip();
 }
 function renderPeriodStatus() {
   const last = lastPostedPeriod(S.currentFund);
@@ -1458,6 +2233,7 @@ const VIEW_TITLES = {
   reconciliation: ["Reconciliation", "Compare the register against your Trial Balance, by account code"],
   retired: ["Retired Assets", "Derecognized / disposed items kept for historical reference"],
   reports: ["Reports", "Generate the Equipment Ledger Card and Property Card for any asset"],
+  cip: ["Construction in Progress", "Track CIP projects and their billings, separate from the Asset Register, until each is completed and transferred to PPE"],
 };
 /** Sets the topbar title/subtitle from the current view + fund. Called on both view changes and
  *  fund switches, since the subtitle always names which fund's books are showing. */
@@ -1528,8 +2304,15 @@ Object.assign(window, {
   retireAsset, saveAsset, submitBulkAdd, postPeriod, undoPosting,
   exportJevCsv, exportReconCsv, saveTbSnapshot,
   openRevalueModal, revalueAsset,
+  openTransferModal, transferAsset,
+  removeAssetPhoto, removeAssetDocument, printAssetIdTag,
   exportRegisterCsv, exportRetiredCsv, exportDepreciationDetailCsv,
   handleTbFileUpload,
   printLedgerCard, printPropertyCard, printLedgerCardsBulk, printPropertyCardsBulk,
   printLedgerCardsBulkReports, printPropertyCardsBulkReports,
+  openCipProjectModal, saveCipProject, openCipDetail,
+  openCipBillingModal, saveCipBilling, deleteCipBilling,
+  openCipCompleteModal, completeCipProject,
+  printCipLedgerCard, printCipLedgerCardsBulk, exportCipCsv,
+  openCipBulkImportModal, submitCipBulkImport,
 });
