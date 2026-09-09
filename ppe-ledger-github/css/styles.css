@@ -70,29 +70,6 @@
   .brand h1{ font-size:16px; font-weight:600; margin:0; line-height:1.2; }
   .brand .sub{ font-size:11px; color:var(--ink-faint); margin-top:2px; letter-spacing:.02em; }
 
-  /* ---------- Ledger switcher (PPE vs. Semi-Expendable) ---------- */
-  /* Same interaction pattern as #fundSwitch just below, but this one picks which module's data
-     and nav tabs are in view; #fundSwitch then further narrows within whichever module is active. */
-  #ledgerSwitch{
-    padding:12px 10px 0; display:flex; flex-direction:column; gap:3px; background:var(--paper-sunken);
-  }
-  #ledgerSwitch button{
-    all:unset; box-sizing:border-box; cursor:pointer;
-    display:flex; align-items:center; gap:9px; width:100%;
-    padding:7px 9px; border-radius:8px; font-size:12.5px; color:var(--ink-soft);
-    transition:background .12s ease, color .12s ease;
-  }
-  #ledgerSwitch button .fundcode{
-    flex:none; display:inline-block; min-width:26px; text-align:center;
-    font-family:"Roboto Mono",monospace; font-size:9.5px; font-weight:700; letter-spacing:.03em;
-    color:var(--ink-soft); background:var(--paper); border:1px solid var(--line);
-    border-radius:99px; padding:3px 7px; line-height:1.3;
-  }
-  #ledgerSwitch button .fundlabel{ white-space:normal; }
-  #ledgerSwitch button:hover{ background:var(--line-soft); color:var(--ink); }
-  #ledgerSwitch button.active{ background:var(--ink); color:#fff; font-weight:600; }
-  #ledgerSwitch button.active .fundcode{ color:var(--ink); background:#fff; border-color:#fff; }
-
   /* ---------- Fund switcher ---------- */
   #fundSwitch{
     padding:12px 10px; border-bottom:1px solid var(--line);
@@ -120,12 +97,6 @@
   #fundSwitch button.active .fundcode{ color:#fff; background:var(--accent); border-color:var(--accent); }
 
   nav{ padding:10px; display:flex; flex-direction:column; gap:2px; flex:1; }
-  .navgroup{ display:flex; flex-direction:column; gap:2px; }
-  /* Equal-specificity fix: the browser's own `[hidden]{display:none}` UA rule and the class rule
-     above tie on specificity, and this stylesheet loads after the UA sheet, so without this the
-     `.navgroup{display:flex}` rule would silently win and an inactive ledger's nav group would
-     stay visible even with the `hidden` attribute set. */
-  .navgroup[hidden]{ display:none; }
   nav button{
     text-align:left; padding:9px 12px; border-radius:8px; border:none; background:transparent;
     color:var(--ink-soft); font-size:13.5px; font-weight:500; cursor:pointer; display:flex;
@@ -270,8 +241,6 @@
     nav button{ justify-content:center; }
     #fundSwitch button .fundlabel{ display:none; }
     #fundSwitch button{ justify-content:center; }
-    #ledgerSwitch button .fundlabel{ display:none; }
-    #ledgerSwitch button{ justify-content:center; }
     .fieldrow,.fieldrow3{ grid-template-columns:1fr; }
   }
 /* ---------- Sign-in screen ---------- */
