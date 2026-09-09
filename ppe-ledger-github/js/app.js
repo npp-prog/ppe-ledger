@@ -335,17 +335,20 @@ function computeReconciliation(fund, period) {
 }
 /**
  * Is the PPE cost (not accumulated depreciation) side of the register tied out to a Trial
- * Balance, as of/most-recently-before the given depreciation period? This is the gate we check
- * before letting a period be posted — accumulated depreciation isn't checked here since this
- * period's posting is exactly what would change it.
+ * Balance for the month immediately before the given depreciation period? This is the gate we
+ * check before letting a period be posted — accumulated depreciation isn't checked here since
+ * this period's posting is exactly what would change it. This deliberately requires the
+ * *immediately preceding* month's Trial Balance specifically (not just "some Trial Balance at or
+ * before this period") — posting July depreciation off a stale May snapshot, with June's
+ * Reconciliation never entered, is exactly the gap this closes.
  */
 function costReconciliationStatus(fund, period) {
-  const tbPeriods = tbSnapshotsForFund(fund).map(d => d.period).filter(p => cmpPeriod(p, period) <= 0).sort(cmpPeriod);
-  const tbPeriod = tbPeriods.length ? tbPeriods[tbPeriods.length - 1] : null;
-  if (!tbPeriod) return { ok: false, reason: "no-tb", tbPeriod: null, flagged: [] };
-  const rows = computeReconciliation(fund, tbPeriod).filter(r => distinctCostAccounts(fund).some(c => c.code === r.code));
+  const requiredPeriod = addMonths(period, -1);
+  const hasRequired = tbSnapshotsForFund(fund).some(d => d.period === requiredPeriod);
+  if (!hasRequired) return { ok: false, reason: "no-tb", tbPeriod: null, requiredPeriod, flagged: [] };
+  const rows = computeReconciliation(fund, requiredPeriod).filter(r => distinctCostAccounts(fund).some(c => c.code === r.code));
   const flagged = rows.filter(r => r.tbCost == null || Math.abs(r.varCost) >= 1);
-  return { ok: flagged.length === 0, reason: flagged.length ? "variance" : null, tbPeriod, flagged };
+  return { ok: flagged.length === 0, reason: flagged.length ? "variance" : null, tbPeriod: requiredPeriod, requiredPeriod, flagged };
 }
 
 /* ---------- JEV (journal entry voucher) engine ---------- */
@@ -1134,8 +1137,8 @@ function renderDepreciation() {
           <div class="banner ${recon.reason === "no-tb" ? "warn" : "bad"}">
             <span>⚠</span>
             <span>${recon.reason === "no-tb"
-              ? "Posting is on hold: no Trial Balance has been uploaded yet for this period or earlier. Go to <b>Reconciliation</b> and save a Trial Balance so PPE cost accounts can be checked first."
-              : `Posting is on hold: ${recon.flagged.length} PPE cost account(s) don't tie out to the Trial Balance for ${periodLabel(recon.tbPeriod)}. Fix or re-upload the Trial Balance in <b>Reconciliation</b>, then come back here.`}</span>
+              ? `Posting is on hold: <b>${periodLabel(recon.requiredPeriod)}</b>'s Trial Balance hasn't been saved yet. Go to <b>Reconciliation</b> and save ${periodLabel(recon.requiredPeriod)}'s Trial Balance so PPE cost accounts can be checked first — each month must be reconciled before the next month's depreciation can post.`
+              : `Posting is on hold: ${recon.flagged.length} PPE cost account(s) don't tie out to the ${periodLabel(recon.tbPeriod)} Trial Balance. Fix or re-upload that Trial Balance in <b>Reconciliation</b>, then come back here.`}</span>
           </div>` : ""}
         <div class="cardrow" style="margin-bottom:0;">
           <div class="card"><div class="label">Assets depreciating</div><div class="value">${assetRows.length}</div></div>
@@ -1193,8 +1196,8 @@ async function postPeriod(period) {
   if (getPosting(fund, period)) return toast("Already posted.");
   const recon = costReconciliationStatus(fund, period);
   if (!recon.ok) return toast(recon.reason === "no-tb"
-    ? "Upload a Trial Balance in Reconciliation before posting."
-    : "PPE cost accounts don't tie out to the Trial Balance yet — fix that in Reconciliation first.");
+    ? `Save ${periodLabel(recon.requiredPeriod)}'s Trial Balance in Reconciliation before posting ${periodLabel(period)}.`
+    : `PPE cost accounts don't tie out to the ${periodLabel(recon.tbPeriod)} Trial Balance yet — fix that in Reconciliation first.`);
   const amounts = {};
   const totalsByAccount = {};
   depreciableActiveAssets(fund).forEach(a => {
