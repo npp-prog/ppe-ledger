@@ -176,6 +176,12 @@ const S = {
   postings: new Map(),    // period -> {period, amounts:{}, postedAt, postedBy}
   tbSnapshots: new Map(), // period -> {period, accounts:{}, ...}
   cipProjects: new Map(), // id -> CIP project doc (own collection, separate from assets)
+  parIcs: new Map(),      // id -> PAR/ICS record doc (own collection, separate from assets — a
+                           // "pending" one is a parking record, not yet in the Asset Register)
+  linkParIcsId: null,     // set by recordParIcs() right before opening the Add Item modal — tells
+                           // saveAsset() which pending PAR/ICS record to mark "recorded" once the
+                           // new asset is created. Reset to null at the top of every openAssetModal()
+                           // call (via its `prefill.parIcsId`), so it never leaks into an unrelated add.
   view: "dashboard",
   currentFund: "GF",      // which fund's books are currently in view — set by setFund(), restored from localStorage
   currentUser: null,      // Firebase Auth user, set by initApp()
@@ -184,6 +190,7 @@ const S = {
   registerFilter: { q: "", category: "", status: "active", itemType: "", classification: "" },
   reportsFilter: { q: "", category: "", status: "active", officer: "", itemType: "", classification: "" },
   cipFilter: { q: "", status: "in_progress" },
+  parIcsFilter: { q: "", docType: "", status: "pending" },
   depPeriod: null,   // chosen period for Monthly Depreciation view
   reconPeriod: null, // chosen period for Reconciliation view
   reconDraft: "",    // unsaved Trial Balance text (pasted or uploaded) not yet tied to a saved period
@@ -432,6 +439,10 @@ function initDb() {
     );
     db.collection("cip_projects").onSnapshot(
       snap => { S.cipProjects.clear(); snap.docs.forEach(d => S.cipProjects.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
+      err => console.error(err)
+    );
+    db.collection("par_ics").onSnapshot(
+      snap => { S.parIcs.clear(); snap.docs.forEach(d => S.parIcs.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
       err => console.error(err)
     );
     // Semi-Expendable Property items live in this same "assets" collection (tagged item_type:
@@ -698,25 +709,36 @@ function assetCategoryOptions(selectedCode) {
  *  Unit of measure, Qty/Unit cost/Total cost, Prior adjustment). Editing an existing item locks the
  *  type — it's shown as a read-only pill instead of a selector, since switching an item's type after
  *  the fact would leave stale PPE-only or SX-only fields behind; retire it and add a new one instead
- *  if it was categorized wrong to begin with. */
-function openAssetModal(existingId, initialType) {
+ *  if it was categorized wrong to begin with.
+ *
+ *  `prefill`, when given (only for a brand-new item — recordParIcs() is the one caller that passes
+ *  it), pre-populates the common fields from a pending PAR/ICS record and locks the Item Type the
+ *  same way editing does, since the record already committed it (PAR → PPE, ICS → Semi-Expendable).
+ *  `prefill.parIcsId` is what tells saveAsset() which PAR/ICS record to mark "recorded" once the new
+ *  asset is actually created — see S.linkParIcsId. */
+function openAssetModal(existingId, initialType, prefill) {
   const a = existingId ? S.assets.get(existingId) : null;
-  const itemType = a ? itemTypeOf(a) : (initialType === "sx" ? "sx" : "ppe");
+  const pf = prefill || {};
+  S.linkParIcsId = pf.parIcsId || null;
+  const itemType = a ? itemTypeOf(a) : (pf.itemType || initialType) === "sx" ? "sx" : "ppe";
+  const locked = !!(a || pf.parIcsId);
   openModal(`
-    <div class="modal-head"><h3>${a ? "Edit item" : "Add item"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-head"><h3>${a ? "Edit item" : pf.parIcsId ? `Record ${pf.recordLabel || ""} to Asset Register` : "Add item"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
+      ${pf.parIcsId ? `<div class="banner info" style="margin-top:0;">Pre-filled from ${esc(pf.recordLabel || "the PAR/ICS record")}. Saving this will mark it <b>Recorded</b> on the PAR / ICS list.</div>` : ""}
       <div class="field">
         <label>Item type</label>
-        ${a
+        ${locked
           ? `<div><span class="pill ${itemType === "sx" ? "neutral" : "good"}">${itemType === "sx" ? "Semi-Expendable Property" : "PPE"}</span>
-             <span class="subtle" style="font-size:11px;">— can't be changed after an item is added; retire it and add a new one instead if it was categorized wrong.</span></div>`
+             <span class="subtle" style="font-size:11px;">${a ? "— can't be changed after an item is added; retire it and add a new one instead if it was categorized wrong." : "— fixed by the record being recorded (PAR → PPE, ICS → Semi-Expendable)."}</span></div>
+             <input type="hidden" id="f_itemtype" value="${itemType}">`
           : `<select id="f_itemtype">
                <option value="ppe" ${itemType === "ppe" ? "selected" : ""}>PPE — depreciable capital asset</option>
                <option value="sx" ${itemType === "sx" ? "selected" : ""}>Semi-Expendable Property — inventory item</option>
              </select>`}
       </div>
       <div class="field"><label>Fund</label>
-        <select id="f_fund">${FUNDS.map(fu => `<option value="${fu.code}" ${(a ? (a.fund || "GF") : S.currentFund) === fu.code ? "selected" : ""}>${esc(fu.label)}</option>`).join("")}</select></div>
+        <select id="f_fund">${FUNDS.map(fu => `<option value="${fu.code}" ${(a ? (a.fund || "GF") : (pf.fund || S.currentFund)) === fu.code ? "selected" : ""}>${esc(fu.label)}</option>`).join("")}</select></div>
 
       <div id="f_block_ppe_account">
         <div class="field"><label>Account / Category</label>
@@ -725,31 +747,31 @@ function openAssetModal(existingId, initialType) {
       <div id="f_block_sx_account" style="display:none;">
         <div class="fieldrow">
           <div class="field"><label>Account</label><select id="f_sx_account">${sxAccountCategoryOptions(a && itemType === "sx" ? a.account_code : "")}</select></div>
-          <div class="field"><label>Semi-Expendable Number (SEN)</label><input id="f_sx_sen" value="${esc(a ? a.sen : "")}" placeholder="e.g. SPHV-2020-12-0001"></div>
+          <div class="field"><label>Semi-Expendable Number (SEN)</label><input id="f_sx_sen" value="${esc(a ? a.sen : (pf.sen || ""))}" placeholder="e.g. SPHV-2020-12-0001"></div>
         </div>
       </div>
 
       <div class="fieldrow">
-        <div class="field"><label>Property / Tag No.</label><input id="f_propid" value="${esc(a ? a.property_id : "")}"></div>
-        <div class="field"><label>Date acquired</label><input type="date" id="f_date" value="${a ? a.date_acquired || "" : ""}"></div>
+        <div class="field"><label>Property / Tag No.</label><input id="f_propid" value="${esc(a ? a.property_id : (pf.property_id || ""))}"></div>
+        <div class="field"><label>Date acquired</label><input type="date" id="f_date" value="${a ? a.date_acquired || "" : (pf.date_acquired || "")}"></div>
       </div>
-      <div class="field"><label>Description</label><textarea id="f_desc" rows="2">${esc(a ? a.description : "")}</textarea></div>
+      <div class="field"><label>Description</label><textarea id="f_desc" rows="2">${esc(a ? a.description : (pf.description || ""))}</textarea></div>
 
       <div id="f_block_sx_article" style="display:none;">
         <div class="fieldrow">
           <div class="field"><label>Article/Type</label><input id="f_sx_article" value="${esc(a ? a.article_type : "")}" placeholder="e.g. COMPUTER SET"></div>
-          <div class="field"><label>Unit of measure</label><input id="f_sx_uom" value="${esc(a ? a.unit_of_measure : "")}" placeholder="e.g. SET, UNIT, PC"></div>
+          <div class="field"><label>Unit of measure</label><input id="f_sx_uom" value="${esc(a ? a.unit_of_measure : (pf.unit_of_measure || ""))}" placeholder="e.g. SET, UNIT, PC"></div>
         </div>
       </div>
 
       <div class="fieldrow">
-        <div class="field"><label>Location / Office</label><input id="f_loc" value="${esc(a ? a.location : "")}"></div>
+        <div class="field"><label>Location / Office</label><input id="f_loc" value="${esc(a ? a.location : (pf.location || ""))}"></div>
         <div class="field"><label>Accountable officer</label><input id="f_officer" value="${esc(a ? a.accountable_officer : "")}"></div>
       </div>
 
       <div id="f_block_ppe_cost">
         <div class="fieldrow3">
-          <div class="field"><label>Cost (Php)</label><input type="number" step="0.01" id="f_cost" value="${a && itemType === "ppe" ? a.cost : ""}"></div>
+          <div class="field"><label>Cost (Php)</label><input type="number" step="0.01" id="f_cost" value="${a && itemType === "ppe" ? a.cost : (pf.cost != null ? pf.cost : "")}"></div>
           <div class="field"><label>5% Residual value (Php)</label><input type="number" step="0.01" id="f_residual" value="${a && itemType === "ppe" ? a.residual_value : ""}"></div>
           <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="f_life" value="${a && itemType === "ppe" ? a.useful_life_years : ""}"></div>
         </div>
@@ -762,18 +784,18 @@ function openAssetModal(existingId, initialType) {
 
       <div id="f_block_sx_cost" style="display:none;">
         <div class="fieldrow3">
-          <div class="field"><label>Qty</label><input type="number" step="1" id="f_sx_qty" value="${a ? (a.qty || 1) : 1}"></div>
-          <div class="field"><label>Unit cost (Php)</label><input type="number" step="0.01" id="f_sx_unitcost" value="${a ? (a.unit_cost || 0) : 0}"></div>
-          <div class="field"><label>Total cost (Php)</label><input type="number" step="0.01" id="f_sx_cost" value="${a ? (a.cost || 0) : 0}"></div>
+          <div class="field"><label>Qty</label><input type="number" step="1" id="f_sx_qty" value="${a ? (a.qty || 1) : (pf.qty || 1)}"></div>
+          <div class="field"><label>Unit cost (Php)</label><input type="number" step="0.01" id="f_sx_unitcost" value="${a ? (a.unit_cost || 0) : (pf.unit_cost || 0)}"></div>
+          <div class="field"><label>Total cost (Php)</label><input type="number" step="0.01" id="f_sx_cost" value="${a ? (a.cost || 0) : (pf.cost || 0)}"></div>
         </div>
-        <p class="subtle" style="font-size:11.5px;margin:-6px 0 10px;">Total cost is what decides High Value (over Php 5,000) vs Low Value (Php 5,000 or below) — enter it directly if it doesn't come out to exactly qty × unit cost in your records. Classification: <span id="f_sx_classpreview">${sxClassificationPill(sxClassificationOf(a && itemType === "sx" ? a : { cost: 0 }))}</span></p>
+        <p class="subtle" style="font-size:11.5px;margin:-6px 0 10px;">Total cost is what decides High Value (over Php 5,000) vs Low Value (Php 5,000 or below) — enter it directly if it doesn't come out to exactly qty × unit cost in your records. Classification: <span id="f_sx_classpreview">${sxClassificationPill(sxClassificationOf(a && itemType === "sx" ? a : { cost: pf.cost || 0 }))}</span></p>
         <div class="field">
           <label>Prior write-down / adjustment already recorded (Php)<br><span class="subtle" style="font-size:11px;font-weight:400;">Only for a pre-existing item whose Adjusted Cost is already below its original cost from before this system — e.g. an item already written down close to zero. Leave 0 for anything with no such history.</span></label>
           <input type="number" step="0.01" id="f_sx_prioradj" value="${a ? (a.prior_adjustment || 0) : 0}">
         </div>
       </div>
 
-      <div class="field"><label>PAR / DV reference / Remarks</label><input id="f_remarks" value="${esc(a ? a.remarks : "")}" placeholder="e.g. PAR No. 2026-01-0004"></div>
+      <div class="field"><label>PAR / DV reference / Remarks</label><input id="f_remarks" value="${esc(a ? a.remarks : (pf.remarks || ""))}" placeholder="e.g. PAR No. 2026-01-0004"></div>
       <div class="fieldrow">
         <div class="field"><label>How was this item acquired?</label>
           <select id="f_acqtype">${ACQUISITION_TYPES.map(t => `<option value="${t.code}" ${(a ? (a.acquisition_type || "purchased") : "purchased") === t.code ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>
@@ -790,7 +812,7 @@ function openAssetModal(existingId, initialType) {
     <div class="modal-foot">
       ${a ? `<button class="btn danger" style="margin-right:auto" onclick="openRetireModal('${a.id}')">Retire this item</button>` : ""}
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
-      <button class="btn primary" id="f_saveBtn" onclick="saveAsset(${a ? `'${a.id}'` : "null"})">${a ? "Save changes" : "Add item"}</button>
+      <button class="btn primary" id="f_saveBtn" onclick="saveAsset(${a ? `'${a.id}'` : "null"})">${a ? "Save changes" : pf.parIcsId ? "Record to Register" : "Add item"}</button>
     </div>
   `);
   const updateAcqSource = () => {
@@ -831,7 +853,7 @@ function openAssetModal(existingId, initialType) {
   const sxAutoCost = () => { const q = Number(sxQtyEl.value) || 0, u = Number(sxUnitEl.value) || 0; if (q && u) { sxCostEl.value = round2(q * u); updateSxPreview(); } };
   sxQtyEl.addEventListener("input", sxAutoCost); sxUnitEl.addEventListener("input", sxAutoCost);
   const toggleType = () => {
-    const t = a ? itemType : document.getElementById("f_itemtype").value;
+    const t = locked ? itemType : document.getElementById("f_itemtype").value;
     const showPpe = t !== "sx";
     document.getElementById("f_block_ppe_account").style.display = showPpe ? "" : "none";
     document.getElementById("f_block_sx_account").style.display = showPpe ? "none" : "";
@@ -839,13 +861,17 @@ function openAssetModal(existingId, initialType) {
     document.getElementById("f_block_ppe_cost").style.display = showPpe ? "" : "none";
     document.getElementById("f_block_sx_cost").style.display = showPpe ? "none" : "";
   };
-  if (!a) document.getElementById("f_itemtype").addEventListener("change", toggleType);
+  if (!locked) document.getElementById("f_itemtype").addEventListener("change", toggleType);
   toggleType();
 }
 
 async function saveAsset(existingId) {
   if (!S.db) return toast("No shared database in this view.");
   const existing = existingId ? S.assets.get(existingId) : null;
+  // Captured up front, before any awaits — recordParIcs()/openAssetModal() set this right before
+  // this modal opened, and only a brand-new item (never an edit) links back to a PAR/ICS record.
+  const linkParIcsId = !existingId ? S.linkParIcsId : null;
+  const linkParIcsRecord = linkParIcsId ? S.parIcs.get(linkParIcsId) : null;
   const itemType = existing ? itemTypeOf(existing) : (document.getElementById("f_itemtype").value === "sx" ? "sx" : "ppe");
   const fund = document.getElementById("f_fund").value;
   const propertyId = document.getElementById("f_propid").value.trim();
@@ -882,6 +908,7 @@ async function saveAsset(existingId) {
       status: "active",
       updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     };
+    if (linkParIcsRecord) { rec.source_par_ics_id = linkParIcsId; rec.source_par_ics_no = linkParIcsRecord.number; }
   } else {
     const accountVal = document.getElementById("f_sx_account").value;
     const accountCode = accountVal ? Number(accountVal) : null;
@@ -911,6 +938,7 @@ async function saveAsset(existingId) {
       updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     };
     if (!existingId) { rec.ledger_entries = []; rec.transfers = []; }
+    if (linkParIcsRecord) { rec.source_par_ics_id = linkParIcsId; rec.source_par_ics_no = linkParIcsRecord.number; }
   }
   const photoFile = document.getElementById("f_photo").files[0];
   const documentFile = document.getElementById("f_document").files[0];
@@ -944,7 +972,16 @@ async function saveAsset(existingId) {
       }
       await S.db.collection("assets").doc(id).update(attach);
     }
-    toast(existingId ? "Item updated." : "Item added.");
+    // Mark the source PAR/ICS record "recorded" now that its item has an asset doc — this is the
+    // one place a pending PAR/ICS record ever transitions to Recorded. S.linkParIcsId is cleared
+    // either way so it can't leak into a later, unrelated Add Item.
+    if (linkParIcsRecord) {
+      await S.db.collection("par_ics").doc(linkParIcsId).update({
+        recorded: true, recorded_asset_id: id, recorded_at: new Date().toISOString(), recorded_by: viewerLabel(),
+      });
+    }
+    S.linkParIcsId = null;
+    toast(existingId ? "Item updated." : linkParIcsRecord ? `Item added — ${linkParIcsRecord.number} marked as recorded.` : "Item added.");
     closeModal();
   } catch (e) {
     console.error(e);
@@ -2501,6 +2538,482 @@ function printPropertyCardsBulk() {
 }
 
 /* ============================================================
+   PAR / ICS — Property Acknowledgment Receipt (issued for PPE, Appendix 51)
+   and Inventory Custodian Slip (issued for Semi-Expendable Property, Annex
+   A.3), matching the two official Candoni forms supplied as reference.
+
+   These are generated and saved to their OWN collection ("par_ics"),
+   separate from "assets" — issuing one does NOT create a register item.
+   Each sits as a "pending" record, like a parking spot, until someone
+   explicitly records it into the Asset Register (the "Record →" action
+   below, which opens the normal Add Item modal pre-filled from the slip).
+   Once that item is saved, this record flips to "recorded" and is linked
+   to the new asset — it can then only be printed, not edited or deleted,
+   since it's now the source document behind a real register entry.
+   ============================================================ */
+function parIcsInFund(fund) { return [...S.parIcs.values()].filter(r => (r.fund || "GF") === fund); }
+/** Next PAR No. for a fund + issue date, format YYYY-MM-NNNN (sequential within that fund and
+ *  calendar month) — matches the client's own numbering, e.g. "2026-07-0007". */
+function nextParNumber(fund, dateStr) {
+  const ym = (dateStr || new Date().toISOString().slice(0, 10)).slice(0, 7);
+  const n = parIcsInFund(fund).filter(r => r.doc_type === "par" && (r.date || "").slice(0, 7) === ym).length + 1;
+  return `${ym}-${String(n).padStart(4, "0")}`;
+}
+/** Next ICS No. for a fund + issue date + classification, format SPHV-YYYY-MM-NNNN /
+ *  SPLV-YYYY-MM-NNNN — the same High/Low Value prefix and per-month sequencing style already used
+ *  for the Semi-Expendable Number (SEN) elsewhere, e.g. "SPHV-2026-05-0027". */
+function nextIcsNumber(fund, dateStr, classification) {
+  const ym = (dateStr || new Date().toISOString().slice(0, 10)).slice(0, 7);
+  const prefix = classification === "low" ? "SPLV" : "SPHV";
+  const n = parIcsInFund(fund).filter(r => r.doc_type === "ics" && (r.date || "").slice(0, 7) === ym && (r.number || "").startsWith(prefix)).length + 1;
+  return `${prefix}-${ym}-${String(n).padStart(4, "0")}`;
+}
+function filterParIcsRows(f) {
+  let rows = parIcsInFund(S.currentFund);
+  if (f.docType) rows = rows.filter(r => r.doc_type === f.docType);
+  if (f.status === "pending") rows = rows.filter(r => !r.recorded);
+  else if (f.status === "recorded") rows = rows.filter(r => r.recorded);
+  if (f.q) {
+    const q = f.q.toLowerCase();
+    rows = rows.filter(r => [r.number, r.description, r.dept_office, r.entity_name, r.property_number, r.item_no]
+      .some(v => v && String(v).toLowerCase().includes(q)));
+  }
+  rows.sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
+  return rows;
+}
+function renderParIcs() {
+  const el = document.getElementById("view-parics");
+  if (!el) return; // older index.html without the PAR/ICS nav tab/container — nothing to render into
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const focus = captureFocus("view-parics");
+  const f = S.parIcsFilter;
+  const rows = filterParIcsRows(f);
+  const pendingCount = parIcsInFund(S.currentFund).filter(r => !r.recorded).length;
+  el.innerHTML = `
+    <div class="banner info" style="margin-bottom:14px;">A PAR or ICS generated here is saved as a <b>pending</b> record — like a parking spot — and does not appear in the Asset Register until you record it. Once recorded, it's marked <b>Recorded</b> here and can only be printed, not edited or deleted.</div>
+    <div class="panel">
+      <div class="toolbar">
+        <input type="text" class="grow" id="piSearch" placeholder="Search number, description, dept/office, property/item no…" value="${esc(f.q)}">
+        <select id="piType"><option value="">PAR &amp; ICS</option><option value="par" ${f.docType === "par" ? "selected" : ""}>PAR only (PPE)</option><option value="ics" ${f.docType === "ics" ? "selected" : ""}>ICS only (Semi-Expendable)</option></select>
+        <select id="piStatus">
+          <option value="pending" ${f.status === "pending" ? "selected" : ""}>Pending (${pendingCount})</option>
+          <option value="recorded" ${f.status === "recorded" ? "selected" : ""}>Recorded</option>
+          <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
+        </select>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="openParModal()">+ New PAR (PPE)</button>
+        <button class="btn primary" onclick="openIcsModal()">+ New ICS (Semi-Expendable)</button>
+      </div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>Type</th><th>Number</th><th>Dept/Office &amp; Entity</th><th>Description</th><th class="num">Qty</th><th class="num">Amount</th><th>Date</th><th>Status</th><th style="width:230px;">Actions</th></tr></thead>
+        <tbody>${rows.length ? rows.map(r => {
+          const isPar = r.doc_type === "par";
+          return `<tr>
+            <td>${isPar ? '<span class="pill good">PAR</span>' : '<span class="pill neutral">ICS</span>'}</td>
+            <td class="mono">${esc(r.number)}</td>
+            <td class="truncate" title="${esc(isPar ? r.dept_office : r.entity_name)}">${esc(isPar ? r.dept_office : r.entity_name) || "—"}</td>
+            <td class="truncate" title="${esc(r.description)}">${esc(r.description) || "—"}</td>
+            <td class="num mono">${r.qty || 1}</td>
+            <td class="num mono">${fmtMoney(isPar ? r.amount : r.cost)}</td>
+            <td class="mono">${fmtDate(r.date)}</td>
+            <td>${r.recorded ? '<span class="pill good">Recorded</span>' : '<span class="pill warn">Pending</span>'}</td>
+            <td>
+              <button class="btn small" style="margin-right:4px;" onclick="${isPar ? "printPar" : "printIcs"}('${r.id}')">Print</button>
+              ${r.recorded
+                ? `<span class="subtle" style="font-size:11px;">→ <a href="#" onclick="openAssetDetail('${r.recorded_asset_id}');return false;">view item</a></span>`
+                : `<button class="btn small" style="margin-right:4px;" onclick="${isPar ? "openParModal" : "openIcsModal"}('${r.id}')">Edit</button>
+                   <button class="btn small primary" style="margin-right:4px;" onclick="recordParIcs('${r.id}')">Record →</button>
+                   <button class="btn small danger" onclick="deleteParIcs('${r.id}')">Delete</button>`}
+            </td>
+          </tr>`;
+        }).join("") : `<tr><td colspan="9"><div class="empty">No PAR/ICS records match these filters.</div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>
+  `;
+  document.getElementById("piSearch").addEventListener("input", e => { S.parIcsFilter.q = e.target.value; renderParIcs(); });
+  document.getElementById("piType").addEventListener("change", e => { S.parIcsFilter.docType = e.target.value; renderParIcs(); });
+  document.getElementById("piStatus").addEventListener("change", e => { S.parIcsFilter.status = e.target.value; renderParIcs(); });
+  restoreFocus(focus);
+}
+
+function openParModal(existingId) {
+  const r = existingId ? S.parIcs.get(existingId) : null;
+  if (r && r.recorded) return toast("This PAR has already been recorded — it can no longer be edited.");
+  const fund = r ? (r.fund || "GF") : S.currentFund;
+  openModal(`
+    <div class="modal-head"><h3>${r ? "Edit PAR" : "New Property Acknowledgment Receipt (PAR)"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p class="subtle" style="margin-top:0;">For PPE only. Saved as a pending record — it won't appear in the Asset Register until you record it from the PAR / ICS list.</p>
+      <div class="fieldrow">
+        <div class="field"><label>Fund</label><select id="p_fund">${FUNDS.map(fu => `<option value="${fu.code}" ${fund === fu.code ? "selected" : ""}>${esc(fu.label)}</option>`).join("")}</select></div>
+        <div class="field"><label>Date issued</label><input type="date" id="p_date" value="${r ? r.date : new Date().toISOString().slice(0, 10)}"></div>
+      </div>
+      <div class="field"><label>Dept/Office</label><input id="p_dept" value="${esc(r ? r.dept_office : "")}" placeholder="e.g. Office of the Municipal Treasurer"></div>
+      <div class="fieldrow3">
+        <div class="field"><label>Quantity</label><input type="number" step="1" id="p_qty" value="${r ? r.qty : 1}"></div>
+        <div class="field"><label>Unit</label><input id="p_unit" value="${esc(r ? r.unit : "UNIT")}"></div>
+        <div class="field"><label>Amount (Php)</label><input type="number" step="0.01" id="p_amount" value="${r ? r.amount : ""}"></div>
+      </div>
+      <div class="field"><label>Description</label><textarea id="p_desc" rows="2">${esc(r ? r.description : "")}</textarea></div>
+      <div class="field"><label>Additional specs <span class="subtle" style="font-weight:400;">(one per line, optional — prints as extra description lines, like the reference form's spec list)</span></label><textarea id="p_detail" rows="3" placeholder="e.g. Color: Starlight&#10;Apple M5 chip&#10;16GB MEMORY, 512GB SSD">${esc(r && r.detail_lines ? r.detail_lines.join("\n") : "")}</textarea></div>
+      <div class="fieldrow">
+        <div class="field"><label>Property Number <span class="subtle" style="font-weight:400;">(optional — can assign when recorded)</span></label><input id="p_propnum" value="${esc(r ? r.property_number : "")}"></div>
+        <div class="field"><label>Date Acquired</label><input type="date" id="p_dateacq" value="${r ? r.date_acquired || "" : ""}"></div>
+      </div>
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <div class="fieldrow">
+        <div class="field"><label>Received by (End User)</label><input id="p_recv_name" value="${esc(r ? r.received_by_name : "")}"></div>
+        <div class="field"><label>Position/Office</label><input id="p_recv_pos" value="${esc(r ? r.received_by_position : "")}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Issued by (Property Custodian)</label><input id="p_issue_name" value="${esc(r ? r.issued_by_name : "")}"></div>
+        <div class="field"><label>Position/Office</label><input id="p_issue_pos" value="${esc(r ? r.issued_by_position : "PROPERTY CUSTODIAN")}"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="saveParIcs('par', ${r ? `'${r.id}'` : "null"})">${r ? "Save changes" : "Save PAR"}</button>
+    </div>
+  `);
+}
+
+function openIcsModal(existingId) {
+  const r = existingId ? S.parIcs.get(existingId) : null;
+  if (r && r.recorded) return toast("This ICS has already been recorded — it can no longer be edited.");
+  const fund = r ? (r.fund || "GF") : S.currentFund;
+  openModal(`
+    <div class="modal-head"><h3>${r ? "Edit ICS" : "New Inventory Custodian Slip (ICS)"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p class="subtle" style="margin-top:0;">For Semi-Expendable Property only. Saved as a pending record — it won't appear in the Asset Register until you record it from the PAR / ICS list.</p>
+      <div class="fieldrow">
+        <div class="field"><label>Fund Cluster</label><select id="i_fund">${FUNDS.map(fu => `<option value="${fu.code}" ${fund === fu.code ? "selected" : ""}>${esc(fu.label)}</option>`).join("")}</select></div>
+        <div class="field"><label>Date issued</label><input type="date" id="i_date" value="${r ? r.date : new Date().toISOString().slice(0, 10)}"></div>
+      </div>
+      <div class="field"><label>Entity Name</label><input id="i_entity" value="${esc(r ? r.entity_name : "")}" placeholder="e.g. MGO - CANDONI - ACCOUNTING OFFICE"></div>
+      <div class="fieldrow3">
+        <div class="field"><label>Quantity</label><input type="number" step="1" id="i_qty" value="${r ? r.qty : 1}"></div>
+        <div class="field"><label>Unit</label><input id="i_unit" value="${esc(r ? r.unit : "UNIT")}"></div>
+        <div class="field"><label>Unit Cost (Php)</label><input type="number" step="0.01" id="i_unitcost" value="${r ? r.unit_cost : ""}"></div>
+      </div>
+      <div class="field"><label>Total Cost (Php)</label><input type="number" step="0.01" id="i_cost" value="${r ? r.cost : ""}"></div>
+      <div class="field"><label>Description</label><textarea id="i_desc" rows="2">${esc(r ? r.description : "")}</textarea></div>
+      <div class="field"><label>Additional specs <span class="subtle" style="font-weight:400;">(one per line, optional)</span></label><textarea id="i_detail" rows="2" placeholder="e.g. COLOR: GRAY">${esc(r && r.detail_lines ? r.detail_lines.join("\n") : "")}</textarea></div>
+      <div class="fieldrow">
+        <div class="field"><label>Item No. <span class="subtle" style="font-weight:400;">(optional — can assign when recorded)</span></label><input id="i_itemno" value="${esc(r ? r.item_no : "")}"></div>
+        <div class="field"><label>Estimated Useful Life</label><input id="i_life" value="${esc(r ? r.estimated_useful_life : "")}" placeholder="e.g. 3 YEARS"></div>
+      </div>
+      <p class="subtle" style="font-size:12px;">Classification (decides the SPHV/SPLV prefix on the ICS No.): <span id="i_classpreview"></span></p>
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <div class="fieldrow">
+        <div class="field"><label>Received from (Property Officer)</label><input id="i_from_name" value="${esc(r ? r.received_from_name : "")}"></div>
+        <div class="field"><label>Position/Office</label><input id="i_from_pos" value="${esc(r ? r.received_from_position : "PROPERTY OFFICER")}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Received by</label><input id="i_to_name" value="${esc(r ? r.received_by_name : "")}"></div>
+        <div class="field"><label>Position/Office</label><input id="i_to_pos" value="${esc(r ? r.received_by_position : "")}"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="saveParIcs('ics', ${r ? `'${r.id}'` : "null"})">${r ? "Save changes" : "Save ICS"}</button>
+    </div>
+  `);
+  const qtyEl = document.getElementById("i_qty"), unitEl = document.getElementById("i_unitcost"), costEl = document.getElementById("i_cost");
+  const updateClassPreview = () => {
+    const cost = Number(costEl.value) || 0;
+    document.getElementById("i_classpreview").innerHTML = sxClassificationPill(sxClassificationOf({ cost }));
+  };
+  const autoCost = () => { const q = Number(qtyEl.value) || 0, u = Number(unitEl.value) || 0; if (q && u) costEl.value = round2(q * u); updateClassPreview(); };
+  qtyEl.addEventListener("input", autoCost); unitEl.addEventListener("input", autoCost); costEl.addEventListener("input", updateClassPreview);
+  updateClassPreview();
+}
+
+async function saveParIcs(docType, existingId) {
+  if (!S.db) return toast("No shared database in this view.");
+  const existing = existingId ? S.parIcs.get(existingId) : null;
+  if (existing && existing.recorded) return toast("Already recorded — can't be edited.");
+  try {
+    if (docType === "par") {
+      const fund = document.getElementById("p_fund").value;
+      const date = document.getElementById("p_date").value || new Date().toISOString().slice(0, 10);
+      const deptOffice = document.getElementById("p_dept").value.trim();
+      const description = document.getElementById("p_desc").value.trim();
+      if (!deptOffice) return toast("Enter the Dept/Office.");
+      if (!description) return toast("Enter a description.");
+      const detailLines = document.getElementById("p_detail").value.split("\n").map(s => s.trim()).filter(Boolean);
+      const rec = {
+        doc_type: "par", fund, date,
+        number: existing ? existing.number : nextParNumber(fund, date),
+        dept_office: deptOffice,
+        qty: Number(document.getElementById("p_qty").value) || 1,
+        unit: document.getElementById("p_unit").value.trim() || "UNIT",
+        description, detail_lines: detailLines,
+        property_number: document.getElementById("p_propnum").value.trim(),
+        date_acquired: document.getElementById("p_dateacq").value || null,
+        amount: round2(Number(document.getElementById("p_amount").value) || 0),
+        received_by_name: document.getElementById("p_recv_name").value.trim(),
+        received_by_position: document.getElementById("p_recv_pos").value.trim(),
+        issued_by_name: document.getElementById("p_issue_name").value.trim(),
+        issued_by_position: document.getElementById("p_issue_pos").value.trim(),
+        updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+      };
+      if (existingId) {
+        await S.db.collection("par_ics").doc(existingId).update(rec);
+        toast("PAR updated.");
+      } else {
+        rec.recorded = false; rec.recorded_asset_id = null; rec.recorded_at = null; rec.recorded_by = null;
+        rec.created_by = viewerLabel(); rec.created_at = new Date().toISOString();
+        await S.db.collection("par_ics").add(rec);
+        toast(`PAR ${rec.number} saved — pending, not yet in the Asset Register.`);
+      }
+    } else {
+      const fund = document.getElementById("i_fund").value;
+      const date = document.getElementById("i_date").value || new Date().toISOString().slice(0, 10);
+      const entityName = document.getElementById("i_entity").value.trim();
+      const description = document.getElementById("i_desc").value.trim();
+      if (!entityName) return toast("Enter the Entity Name.");
+      if (!description) return toast("Enter a description.");
+      const detailLines = document.getElementById("i_detail").value.split("\n").map(s => s.trim()).filter(Boolean);
+      const cost = round2(Number(document.getElementById("i_cost").value) || 0);
+      const classification = sxClassificationOf({ cost });
+      const rec = {
+        doc_type: "ics", fund, date,
+        number: existing ? existing.number : nextIcsNumber(fund, date, classification),
+        entity_name: entityName,
+        qty: Number(document.getElementById("i_qty").value) || 1,
+        unit: document.getElementById("i_unit").value.trim() || "UNIT",
+        unit_cost: round2(Number(document.getElementById("i_unitcost").value) || 0),
+        cost, description, detail_lines: detailLines,
+        item_no: document.getElementById("i_itemno").value.trim(),
+        estimated_useful_life: document.getElementById("i_life").value.trim(),
+        received_from_name: document.getElementById("i_from_name").value.trim(),
+        received_from_position: document.getElementById("i_from_pos").value.trim(),
+        received_by_name: document.getElementById("i_to_name").value.trim(),
+        received_by_position: document.getElementById("i_to_pos").value.trim(),
+        updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+      };
+      if (existingId) {
+        await S.db.collection("par_ics").doc(existingId).update(rec);
+        toast("ICS updated.");
+      } else {
+        rec.recorded = false; rec.recorded_asset_id = null; rec.recorded_at = null; rec.recorded_by = null;
+        rec.created_by = viewerLabel(); rec.created_at = new Date().toISOString();
+        await S.db.collection("par_ics").add(rec);
+        toast(`ICS ${rec.number} saved — pending, not yet in the Asset Register.`);
+      }
+    }
+    closeModal();
+  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+}
+
+async function deleteParIcs(id) {
+  const r = S.parIcs.get(id);
+  if (!r) return;
+  if (r.recorded) return toast("Can't delete — already recorded into the Asset Register.");
+  if (!confirm(`Delete ${r.number}? This can't be undone.`)) return;
+  await S.db.collection("par_ics").doc(id).delete();
+  toast("Deleted.");
+}
+
+/** Opens the unified Add Item modal pre-filled from a pending PAR/ICS record — the "catch it into
+ *  the register" step. openAssetModal() locks the Item Type (PAR → PPE, ICS → Semi-Expendable) and
+ *  sets S.linkParIcsId so saveAsset() marks this record "recorded" once the new asset is saved. */
+function recordParIcs(id) {
+  const r = S.parIcs.get(id);
+  if (!r) return;
+  if (r.recorded) return toast("Already recorded.");
+  const isPar = r.doc_type === "par";
+  const prefill = isPar
+    ? {
+        parIcsId: id, recordLabel: `PAR ${r.number}`, itemType: "ppe", fund: r.fund,
+        property_id: r.property_number || "", date_acquired: r.date_acquired || r.date,
+        description: r.description, location: r.dept_office, cost: r.amount,
+        remarks: `PAR No. ${r.number}`,
+      }
+    : {
+        parIcsId: id, recordLabel: `ICS ${r.number}`, itemType: "sx", fund: r.fund,
+        property_id: r.item_no || "", date_acquired: r.date,
+        description: r.description, location: r.entity_name,
+        qty: r.qty, unit_cost: r.unit_cost, cost: r.cost, unit_of_measure: r.unit,
+        sen: r.number, remarks: `ICS No. ${r.number}`,
+      };
+  openAssetModal(null, prefill.itemType, prefill);
+}
+
+/** Portrait print wrapper for PAR/ICS — kept separate from printCardsHtml() (which is landscape,
+ *  for the Ledger/Property Card ledger-style reports) since these are single vertical forms. */
+function parIcsPrintHtml(title, bodyHtml) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${esc(title)}</title>
+  <style>
+    @page { size: letter portrait; margin: 0.5in; }
+    * { box-sizing: border-box; }
+    body { font-family: "Times New Roman", Georgia, serif; color: #111; margin: 0; font-size: 11px; }
+    .form { page-break-after: always; }
+    .form:last-child { page-break-after: auto; }
+    .annex { text-align: right; font-style: italic; font-size: 11px; margin-bottom: 2px; }
+    .head { text-align: center; margin-bottom: 10px; }
+    .head img { width: 64px; height: 64px; object-fit: contain; }
+    .head h1 { font-size: 15px; margin: 4px 0 0; }
+    .head h2 { font-size: 14px; margin: 2px 0 0; letter-spacing: 0.5px; }
+    .infoline { display: flex; align-items: baseline; gap: 6px; margin-bottom: 3px; font-size: 11.5px; }
+    .infoline b { white-space: nowrap; }
+    .infoline .val { flex: 1; border-bottom: 1px solid #000; min-height: 14px; }
+    .headrow { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 6px; }
+    .headrow .num { font-size: 15px; font-weight: bold; border-bottom: 1px solid #000; padding: 0 4px; min-width: 140px; text-align: center; }
+    table.pf { width: 100%; border-collapse: collapse; font-size: 10.5px; margin-top: 4px; }
+    table.pf th, table.pf td { border: 1px solid #000; padding: 3px 5px; vertical-align: top; }
+    table.pf th { font-weight: bold; text-align: center; font-size: 10px; }
+    table.pf td.num { text-align: right; white-space: nowrap; }
+    table.pf tr.blank td { height: 17px; }
+    table.pf tr.nothing td { text-align: center; font-weight: bold; letter-spacing: 1px; }
+    .sig { display: flex; margin-top: 22px; }
+    .sig .col { flex: 1; text-align: center; padding: 0 10px; }
+    .sig .who { text-align: left; font-size: 11px; margin-bottom: 30px; }
+    .sig .name { border-top: 1px solid #000; padding-top: 2px; font-weight: bold; }
+    .sig .cap { font-size: 9.5px; }
+    .sig .pos { border-top: 1px solid #000; margin-top: 20px; padding-top: 2px; font-size: 10px; }
+    .sig .poscap { font-size: 9.5px; }
+    .sig .date { border-top: 1px solid #000; margin-top: 18px; padding-top: 2px; font-size: 10px; }
+    .foot-note { font-size: 9px; font-style: italic; margin-top: 6px; }
+    .no-print { }
+    @media print { .no-print { display: none !important; } }
+    .print-bar { text-align: center; padding: 10px; }
+    .print-bar button { font: inherit; padding: 8px 18px; margin: 0 6px; cursor: pointer; }
+  </style></head>
+  <body>
+    <div class="no-print print-bar">
+      <button onclick="window.print()">Print / Save as PDF</button>
+      <button onclick="window.close()">Close</button>
+    </div>
+    ${bodyHtml}
+  </body></html>`;
+}
+function parHtml(r) {
+  const lines = r.detail_lines || [];
+  const totalRows = 24;
+  const blankRows = Math.max(0, totalRows - (1 + lines.length));
+  return `
+    <div class="form">
+      <div class="annex">Appendix 51</div>
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : ""}
+        <h1>MUNICIPAL GOVERNMENT OF CANDONI</h1>
+        <h2>PROPERTY ACKNOWLEDGMENT RECEIPT</h2>
+      </div>
+      <div class="infoline"><b>Dept/Office :</b><span class="val">${esc(r.dept_office)}</span></div>
+      <div class="headrow">
+        <div class="infoline" style="flex:1;margin-bottom:0;"><b>Fund :</b><span class="val">${esc(fundLabel(r.fund || "GF"))}</span></div>
+        <div style="text-align:right;"><b>PAR No.:</b><div class="num">${esc(r.number)}</div></div>
+      </div>
+      <table class="pf">
+        <thead><tr><th style="width:9%">Quantity</th><th style="width:9%">Unit</th><th style="width:38%">Description</th><th style="width:16%">Property Number</th><th style="width:13%">Date Acquired</th><th style="width:15%">Amount</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="num">${r.qty || 1}</td><td>${esc(r.unit)}</td><td>${esc(r.description)}</td>
+            <td style="text-align:center;">${esc(r.property_number) || ""}</td>
+            <td style="text-align:center;">${fmtDateShort(r.date_acquired)}</td>
+            <td class="num">${fmtNum(r.amount)}</td>
+          </tr>
+          ${lines.map(l => `<tr><td></td><td></td><td>${esc(l)}</td><td></td><td></td><td></td></tr>`).join("")}
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
+        </tbody>
+      </table>
+      <div class="sig">
+        <div class="col">
+          <div class="who">Received by:</div>
+          <div class="name">${esc(r.received_by_name) || "&nbsp;"}</div>
+          <div class="cap">Signature over Printed Name of End User</div>
+          <div class="pos">${esc(r.received_by_position) || "&nbsp;"}</div>
+          <div class="poscap">Position/Office</div>
+          <div class="date">&nbsp;</div>
+          <div class="poscap">Date</div>
+        </div>
+        <div class="col">
+          <div class="who">Issued by:</div>
+          <div class="name">${esc(r.issued_by_name) || "&nbsp;"}</div>
+          <div class="cap">Signature over Printed Name of Supply and/or Property Custodian</div>
+          <div class="pos">${esc(r.issued_by_position) || "PROPERTY CUSTODIAN"}</div>
+          <div class="poscap">Position/Office</div>
+          <div class="date">&nbsp;</div>
+          <div class="poscap">Date</div>
+        </div>
+      </div>
+    </div>`;
+}
+function icsHtml(r) {
+  const lines = r.detail_lines || [];
+  const totalRows = 24;
+  const blankRows = Math.max(0, totalRows - (1 + lines.length));
+  return `
+    <div class="form">
+      <div class="annex">Annex A.3</div>
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : ""}
+        <h1>MUNICIPAL GOVERNMENT OF CANDONI</h1>
+        <h2>INVENTORY CUSTODIAN SLIP</h2>
+      </div>
+      <div class="infoline"><b>Entity Name :</b><span class="val">${esc(r.entity_name)}</span></div>
+      <div class="headrow">
+        <div class="infoline" style="flex:1;margin-bottom:0;"><b>Fund Cluster :</b><span class="val">${esc(fundLabel(r.fund || "GF"))}</span></div>
+        <div style="text-align:right;"><b>ICS No :</b><div class="num">${esc(r.number)}</div></div>
+      </div>
+      <table class="pf">
+        <thead><tr>
+          <th rowspan="2" style="width:9%">Quantity</th><th rowspan="2" style="width:8%">Unit</th>
+          <th colspan="2">Amount</th>
+          <th rowspan="2" style="width:32%">Description</th><th rowspan="2" style="width:14%">Item No.</th><th rowspan="2" style="width:13%">Estimated<br>Useful Life</th>
+        </tr>
+        <tr><th style="width:10%">Unit Cost</th><th style="width:10%">Total Cost</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="num">${r.qty || 1}</td><td>${esc(r.unit)}</td>
+            <td class="num">${fmtNum(r.unit_cost)}</td><td class="num">${fmtNum(r.cost)}</td>
+            <td>${esc(r.description)}</td>
+            <td style="text-align:center;">${esc(r.item_no) || ""}</td>
+            <td style="text-align:center;">${esc(r.estimated_useful_life) || ""}</td>
+          </tr>
+          ${lines.map(l => `<tr><td></td><td></td><td></td><td></td><td>${esc(l)}</td><td></td><td></td></tr>`).join("")}
+          <tr class="nothing"><td colspan="7">***NOTHING FOLLOWS***</td></tr>
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
+        </tbody>
+      </table>
+      <div class="sig">
+        <div class="col">
+          <div class="who">Received from:</div>
+          <div class="name">${esc(r.received_from_name) || "&nbsp;"}</div>
+          <div class="cap">Signature over Printed Name</div>
+          <div class="pos">${esc(r.received_from_position) || "PROPERTY OFFICER"}</div>
+          <div class="poscap">Position/Office</div>
+          <div class="date">&nbsp;</div>
+          <div class="poscap">Date</div>
+        </div>
+        <div class="col">
+          <div class="who">Received by:</div>
+          <div class="name">${esc(r.received_by_name) || "&nbsp;"}</div>
+          <div class="cap">Signature over Printed Name</div>
+          <div class="pos">${esc(r.received_by_position) || "&nbsp;"}</div>
+          <div class="poscap">Position/Office</div>
+          <div class="date">&nbsp;</div>
+          <div class="poscap">Date</div>
+        </div>
+      </div>
+      <div class="foot-note">Supply and/or Property Division/Unit</div>
+    </div>`;
+}
+function printPar(id) {
+  const r = S.parIcs.get(id);
+  if (!r) return;
+  openPrintWindow("Property Acknowledgment Receipt", parIcsPrintHtml("PAR " + r.number, parHtml(r)));
+}
+function printIcs(id) {
+  const r = S.parIcs.get(id);
+  if (!r) return;
+  openPrintWindow("Inventory Custodian Slip", parIcsPrintHtml("ICS " + r.number, icsHtml(r)));
+}
+
+/* ============================================================
    RENDER: Reports — the dedicated, discoverable home for generating the
    Equipment Ledger Card and Property Card (also reachable per-asset from
    the Asset Register / asset detail modal, and in bulk from the Register
@@ -2975,6 +3488,7 @@ function renderAll() {
   renderRetired();
   renderReports();
   renderCip();
+  renderParIcs();
 }
 function renderPeriodStatus() {
   const last = lastPostedPeriod(S.currentFund);
@@ -2989,6 +3503,7 @@ const VIEW_TITLES = {
   retired: ["Retired Assets", "Derecognized / disposed items kept for historical reference"],
   reports: ["Reports", "Generate the Equipment Ledger Card and Property Card for any item"],
   cip: ["Construction in Progress", "Track CIP projects and their billings, separate from the Asset Register, until each is completed and transferred to PPE"],
+  parics: ["PAR / ICS", "Generate a Property Acknowledgment Receipt (PPE) or Inventory Custodian Slip (Semi-Expendable) — saved as a pending record until you record it into the Asset Register"],
 };
 /** Sets the topbar title/subtitle from the current view + fund. Called on both view changes and
  *  fund switches, since the subtitle always names which fund's books are showing. */
@@ -3072,4 +3587,5 @@ Object.assign(window, {
   openCipBulkImportModal, submitCipBulkImport,
   openSxBulkAddModal, submitSxBulkAdd,
   openSxLedgerEntryModal, saveSxLedgerEntry,
+  openParModal, openIcsModal, saveParIcs, deleteParIcs, recordParIcs, printPar, printIcs,
 });
