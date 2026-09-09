@@ -514,21 +514,18 @@ function renderDashboard() {
     <div class="cardrow">
       <div class="card"><div class="label">PPE Total Cost</div><div class="value">${fmtMoney(ppeCost)}</div><div class="foot">${ppeActive.length} active PPE item(s)</div></div>
       <div class="card"><div class="label">Semi-Expendable Total Cost</div><div class="value">${fmtMoney(sxCost)}</div><div class="foot">${sxActive.length} active item(s)</div></div>
-      <div class="card"><div class="label">Accumulated Depreciation</div><div class="value">${fmtMoney(totalAD)}</div><div class="foot">as of ${last ? periodShort(last) : periodShort(BASELINE_PERIOD)} — PPE only</div></div>
-      <div class="card"><div class="label">Carrying Amount</div><div class="value">${fmtMoney(totalCarrying)}</div><div class="foot">net book value, all classes</div></div>
-      <div class="card"><div class="label">Semi-Expendable Classification</div><div class="value">${highCount} / ${lowCount}</div><div class="foot">High Value / Low Value — ${sxActive.length} item(s)</div></div>
-      <div class="card"><div class="label">Reconciliation</div><div class="value" style="color:${flags.length ? "var(--bad)" : "var(--good)"}">${latestTbPeriod ? flags.length + " to check" : "—"}</div><div class="foot">${latestTbPeriod ? okCount + " accounts tie out • " + periodShort(latestTbPeriod) : "No Trial Balance loaded yet"}</div></div>
       <div class="card"><div class="label">Construction in Progress</div><div class="value">${fmtMoney(cipTotal)}</div><div class="foot">${cipInProgress.length} project(s) not yet transferred · <a href="#" onclick="setView('cip');return false;">view</a></div></div>
+      <div class="card"><div class="label">Carrying Amount</div><div class="value">${fmtMoney(totalCarrying)}</div><div class="foot">net book value, all classes</div></div>
+      <div class="card"><div class="label">Reconciliation</div><div class="value" style="color:${flags.length ? "var(--bad)" : "var(--good)"}">${latestTbPeriod ? flags.length + " to check" : "—"}</div><div class="foot">${latestTbPeriod ? okCount + " accounts tie out • " + periodShort(latestTbPeriod) : "No Trial Balance loaded yet"}</div></div>
     </div>
 
     <div class="panel">
       <div class="panel-head">
-        <div><h3>Depreciation posting status</h3><div class="desc">Baseline anchored to your ${fmtDate(BASELINE_PERIOD + "-31")} Trial Balance — PPE only; Semi-Expendable property is never depreciated</div></div>
+        <div><h3>Depreciation posting status</h3></div>
         <button class="btn primary" onclick="setView('depreciation')">Go to Monthly Depreciation →</button>
       </div>
       <div class="panel-body">
         <div class="kv" style="grid-template-columns:180px 1fr;">
-          <dt>Baseline period</dt><dd class="mono">${periodLabel(BASELINE_PERIOD)}</dd>
           <dt>Last posted</dt><dd class="mono">${last ? periodLabel(last) : "None — not yet started"}</dd>
           <dt>Next due</dt><dd class="mono">${periodLabel(next)}${cmpPeriod(next, todayPeriod()) < 0 ? ' <span class="pill warn">overdue</span>' : ""}</dd>
           <dt>Depreciable assets</dt><dd>${depreciableActiveAssets(fund).length} of ${ppeActive.length} active PPE items (${nonDep} non-depreciable: land, CIP, biological)</dd>
@@ -3493,7 +3490,7 @@ function renderAll() {
 function renderPeriodStatus() {
   const last = lastPostedPeriod(S.currentFund);
   document.getElementById("periodStatus").textContent =
-    "Baseline " + periodShort(BASELINE_PERIOD) + (last ? " • Posted through " + periodShort(last) : " • No postings yet");
+    last ? "Posted through " + periodShort(last) : "No postings yet";
 }
 const VIEW_TITLES = {
   dashboard: ["Dashboard", "PPE and Semi-Expendable Property, together in one place"],
