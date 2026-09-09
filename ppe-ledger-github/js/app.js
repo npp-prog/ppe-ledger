@@ -2585,6 +2585,12 @@ function nextIcsNumber(fund, dateStr, classification) {
   const n = parIcsInFund(fund).filter(r => r.doc_type === "ics" && (r.date || "").slice(0, 7) === ym && (r.number || "").startsWith(prefix)).length + 1;
   return `${prefix}-${ym}-${String(n).padStart(4, "0")}`;
 }
+/** True if `number` is already used by a different PAR/ICS record of the same doc_type in this
+ *  fund — checked before saving a manually-entered (or manually-edited) number so two records
+ *  never silently collide. `excludeId` lets an existing record keep its own number unflagged. */
+function parIcsNumberTaken(fund, docType, number, excludeId) {
+  return parIcsInFund(fund).some(r => r.doc_type === docType && r.number === number && r.id !== excludeId);
+}
 function filterParIcsRows(f) {
   let rows = parIcsInFund(S.currentFund);
   if (f.docType) rows = rows.filter(r => r.doc_type === f.docType);
@@ -2661,7 +2667,8 @@ function renderParIcs() {
             <td>
               <button class="btn small" style="margin-right:4px;" onclick="${isPar ? "printPar" : "printIcs"}('${r.id}')">Print</button>
               ${r.recorded
-                ? `<span class="subtle" style="font-size:11px;">→ <a href="#" onclick="openAssetDetail('${r.recorded_asset_id}');return false;">view item</a></span>`
+                ? `<a href="#" onclick="openAssetDetail('${r.recorded_asset_id}');return false;" style="font-size:11px;margin-right:8px;">view item</a>
+                   <button class="btn small ghost" onclick="unrecordParIcs('${r.id}')">↩ Unrecord</button>`
                 : `<button class="btn small" style="margin-right:4px;" onclick="${isPar ? "openParModal" : "openIcsModal"}('${r.id}')">Edit</button>
                    <button class="btn small primary" style="margin-right:4px;" onclick="recordParIcsChoice('${r.id}')">Record →</button>
                    <button class="btn small danger" onclick="deleteParIcs('${r.id}')">Delete</button>`}
@@ -2686,8 +2693,9 @@ function openParModal(existingId) {
     <div class="modal-head"><h3>${r ? "Edit PAR" : "New Property Acknowledgment Receipt (PAR)"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
       <p class="subtle" style="margin-top:0;">For PPE only. Saved as a pending record — it won't appear in the Asset Register until you record it from the PAR / ICS list.</p>
-      <div class="fieldrow">
+      <div class="fieldrow3">
         <div class="field"><label>Fund</label><select id="p_fund">${FUNDS.map(fu => `<option value="${fu.code}" ${fund === fu.code ? "selected" : ""}>${esc(fu.label)}</option>`).join("")}</select></div>
+        <div class="field"><label>PAR No. <span class="subtle" style="font-weight:400;">(pre-filled, edit if needed)</span></label><input id="p_number" class="mono" value="${esc(r ? r.number : nextParNumber(fund, new Date().toISOString().slice(0, 10)))}" placeholder="YYYY-MM-NNNN"></div>
         <div class="field"><label>Date issued</label><input type="date" id="p_date" value="${r ? r.date : new Date().toISOString().slice(0, 10)}"></div>
       </div>
       <div class="field"><label>Dept/Office</label><input id="p_dept" value="${esc(r ? r.dept_office : "")}" placeholder="e.g. Office of the Municipal Treasurer"></div>
@@ -2727,8 +2735,9 @@ function openIcsModal(existingId) {
     <div class="modal-head"><h3>${r ? "Edit ICS" : "New Inventory Custodian Slip (ICS)"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
       <p class="subtle" style="margin-top:0;">For Semi-Expendable Property only. Saved as a pending record — it won't appear in the Asset Register until you record it from the PAR / ICS list.</p>
-      <div class="fieldrow">
+      <div class="fieldrow3">
         <div class="field"><label>Fund Cluster</label><select id="i_fund">${FUNDS.map(fu => `<option value="${fu.code}" ${fund === fu.code ? "selected" : ""}>${esc(fu.label)}</option>`).join("")}</select></div>
+        <div class="field"><label>ICS No. <span class="subtle" style="font-weight:400;">(pre-filled, edit if needed)</span></label><input id="i_number" class="mono" value="${esc(r ? r.number : "")}" placeholder="auto-assigned on save unless entered"></div>
         <div class="field"><label>Date issued</label><input type="date" id="i_date" value="${r ? r.date : new Date().toISOString().slice(0, 10)}"></div>
       </div>
       <div class="field"><label>Entity Name</label><input id="i_entity" value="${esc(r ? r.entity_name : "")}" placeholder="e.g. MGO - CANDONI - ACCOUNTING OFFICE"></div>
@@ -2761,12 +2770,18 @@ function openIcsModal(existingId) {
     </div>
   `);
   const qtyEl = document.getElementById("i_qty"), unitEl = document.getElementById("i_unitcost"), costEl = document.getElementById("i_cost");
+  const numberEl = document.getElementById("i_number"), fundEl = document.getElementById("i_fund"), dateEl = document.getElementById("i_date");
   const updateClassPreview = () => {
     const cost = Number(costEl.value) || 0;
-    document.getElementById("i_classpreview").innerHTML = sxClassificationPill(sxClassificationOf({ cost }));
+    const classification = sxClassificationOf({ cost });
+    document.getElementById("i_classpreview").innerHTML = sxClassificationPill(classification);
+    // Live "what would be auto-assigned" placeholder, shown only while this field is left blank on
+    // a brand-new record — never overwrites a value the user typed or an existing record's number.
+    if (!r) numberEl.placeholder = `auto-assigned: ${nextIcsNumber(fundEl.value, dateEl.value, classification)}`;
   };
   const autoCost = () => { const q = Number(qtyEl.value) || 0, u = Number(unitEl.value) || 0; if (q && u) costEl.value = round2(q * u); updateClassPreview(); };
   qtyEl.addEventListener("input", autoCost); unitEl.addEventListener("input", autoCost); costEl.addEventListener("input", updateClassPreview);
+  fundEl.addEventListener("change", updateClassPreview); dateEl.addEventListener("change", updateClassPreview);
   updateClassPreview();
 }
 
@@ -2782,10 +2797,12 @@ async function saveParIcs(docType, existingId) {
       const description = document.getElementById("p_desc").value.trim();
       if (!deptOffice) return toast("Enter the Dept/Office.");
       if (!description) return toast("Enter a description.");
+      const enteredNumber = document.getElementById("p_number").value.trim();
+      const number = enteredNumber || (existing ? existing.number : nextParNumber(fund, date));
+      if (parIcsNumberTaken(fund, "par", number, existingId)) return toast(`PAR No. ${number} is already used by another PAR in this fund.`);
       const detailLines = document.getElementById("p_detail").value.split("\n").map(s => s.trim()).filter(Boolean);
       const rec = {
-        doc_type: "par", fund, date,
-        number: existing ? existing.number : nextParNumber(fund, date),
+        doc_type: "par", fund, date, number,
         dept_office: deptOffice,
         qty: Number(document.getElementById("p_qty").value) || 1,
         unit: document.getElementById("p_unit").value.trim() || "UNIT",
@@ -2818,9 +2835,11 @@ async function saveParIcs(docType, existingId) {
       const detailLines = document.getElementById("i_detail").value.split("\n").map(s => s.trim()).filter(Boolean);
       const cost = round2(Number(document.getElementById("i_cost").value) || 0);
       const classification = sxClassificationOf({ cost });
+      const enteredNumber = document.getElementById("i_number").value.trim();
+      const number = enteredNumber || (existing ? existing.number : nextIcsNumber(fund, date, classification));
+      if (parIcsNumberTaken(fund, "ics", number, existingId)) return toast(`ICS No. ${number} is already used by another ICS in this fund.`);
       const rec = {
-        doc_type: "ics", fund, date,
-        number: existing ? existing.number : nextIcsNumber(fund, date, classification),
+        doc_type: "ics", fund, date, number,
         entity_name: entityName,
         qty: Number(document.getElementById("i_qty").value) || 1,
         unit: document.getElementById("i_unit").value.trim() || "UNIT",
@@ -2968,6 +2987,35 @@ async function matchParIcsToExisting(parIcsId, assetId) {
   }
   closeModal();
   toast(`${r.number} matched to the existing item and marked Recorded.`);
+}
+/** Undoes a Record/Match — puts the PAR/ICS back to Pending, for when it was recorded in error
+ *  (wrong item matched, recorded too early, etc.). For a *matched* record this is fully safe: the
+ *  linked item existed before the match and is left exactly as it was — only the link is removed.
+ *  For a record that created its own new item, that item is deliberately NOT deleted automatically
+ *  (it may already carry a photo, a transfer, or other real activity by the time someone notices the
+ *  mistake) — the confirmation explains that and points the user to retire/remove it separately if
+ *  it really shouldn't exist. Either way, if the linked asset's source_par_ics_id still points back
+ *  at this record, that backlink is cleared too, so the asset stops claiming a source that's now
+ *  pending again. */
+async function unrecordParIcs(id) {
+  const r = S.parIcs.get(id);
+  if (!r) return;
+  if (!r.recorded) return;
+  const a = r.recorded_asset_id ? S.assets.get(r.recorded_asset_id) : null;
+  const label = r.doc_type === "par" ? "PAR" : "ICS";
+  const itemDesc = a ? (a.property_id || a.description || "the linked item") : "the linked item";
+  const msg = r.matched_existing
+    ? `Revert ${r.number} back to Pending? This only undoes the match — ${itemDesc} stays in the Asset Register exactly as it is.`
+    : `Revert ${r.number} back to Pending? ${itemDesc} was created in the Asset Register from this ${label} and will NOT be deleted automatically — if it was recorded in error, retire or remove it from the Asset Register separately.`;
+  if (!confirm(msg)) return;
+  await S.db.collection("par_ics").doc(id).update({
+    recorded: false, recorded_asset_id: null, recorded_at: null, recorded_by: null, matched_existing: null,
+    unrecorded_at: new Date().toISOString(), unrecorded_by: viewerLabel(),
+  });
+  if (a && a.source_par_ics_id === id) {
+    await S.db.collection("assets").doc(a.id).update({ source_par_ics_id: null, source_par_ics_no: null });
+  }
+  toast(`${r.number} reverted to Pending.`);
 }
 
 /** Portrait print wrapper for PAR/ICS — kept separate from printCardsHtml() (which is landscape,
@@ -3717,5 +3765,5 @@ Object.assign(window, {
   openSxBulkAddModal, submitSxBulkAdd,
   openSxLedgerEntryModal, saveSxLedgerEntry,
   openParModal, openIcsModal, saveParIcs, deleteParIcs, printPar, printIcs, exportParIcsCsv,
-  recordParIcsChoice, recordParIcsAsNew, openMatchParIcsModal, matchParIcsToExisting,
+  recordParIcsChoice, recordParIcsAsNew, openMatchParIcsModal, matchParIcsToExisting, unrecordParIcs,
 });
