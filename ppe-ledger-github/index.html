@@ -51,19 +51,32 @@
         </div>
       </div>
     </div>
+    <div id="ledgerSwitch">
+      <button data-ledger="ppe" class="active" type="button"><span class="fundcode">PPE</span><span class="fundlabel">Property, Plant &amp; Equipment</span></button>
+      <button data-ledger="sx" type="button"><span class="fundcode">SX</span><span class="fundlabel">Semi-Expendable Property</span></button>
+    </div>
     <div id="fundSwitch">
       <button data-fund="GF" class="active" type="button"><span class="fundcode">GF</span><span class="fundlabel">General Fund</span></button>
       <button data-fund="SEF" type="button"><span class="fundcode">SEF</span><span class="fundlabel">Special Education Fund</span></button>
       <button data-fund="TF" type="button"><span class="fundcode">TF</span><span class="fundlabel">Trust Fund</span></button>
     </div>
     <nav id="nav">
-      <button data-view="dashboard" class="active"><span class="ico">01</span><span class="label">Dashboard</span></button>
-      <button data-view="register"><span class="ico">02</span><span class="label">Asset Register</span></button>
-      <button data-view="depreciation"><span class="ico">03</span><span class="label">Monthly Depreciation</span></button>
-      <button data-view="reconciliation"><span class="ico">04</span><span class="label">Reconciliation</span></button>
-      <button data-view="retired"><span class="ico">05</span><span class="label">Retired Assets</span></button>
-      <button data-view="reports"><span class="ico">06</span><span class="label">Reports</span></button>
-      <button data-view="cip"><span class="ico">07</span><span class="label">Construction in Progress</span></button>
+      <div class="navgroup" data-ledger-group="ppe">
+        <button data-view="dashboard" class="active"><span class="ico">01</span><span class="label">Dashboard</span></button>
+        <button data-view="register"><span class="ico">02</span><span class="label">Asset Register</span></button>
+        <button data-view="depreciation"><span class="ico">03</span><span class="label">Monthly Depreciation</span></button>
+        <button data-view="reconciliation"><span class="ico">04</span><span class="label">Reconciliation</span></button>
+        <button data-view="retired"><span class="ico">05</span><span class="label">Retired Assets</span></button>
+        <button data-view="reports"><span class="ico">06</span><span class="label">Reports</span></button>
+        <button data-view="cip"><span class="ico">07</span><span class="label">Construction in Progress</span></button>
+      </div>
+      <div class="navgroup" data-ledger-group="sx" hidden>
+        <button data-view="sxdashboard" class="active"><span class="ico">01</span><span class="label">Dashboard</span></button>
+        <button data-view="sxregister"><span class="ico">02</span><span class="label">Asset Register</span></button>
+        <button data-view="sxreconciliation"><span class="ico">03</span><span class="label">Reconciliation</span></button>
+        <button data-view="sxretired"><span class="ico">04</span><span class="label">Retired Assets</span></button>
+        <button data-view="sxreports"><span class="ico">05</span><span class="label">Reports</span></button>
+      </div>
     </nav>
     <div class="sidebar-foot">
       <div>Signed in as</div>
@@ -93,6 +106,11 @@
       <div class="view" id="view-retired"></div>
       <div class="view" id="view-reports"></div>
       <div class="view" id="view-cip"></div>
+      <div class="view" id="view-sxdashboard"></div>
+      <div class="view" id="view-sxregister"></div>
+      <div class="view" id="view-sxreconciliation"></div>
+      <div class="view" id="view-sxretired"></div>
+      <div class="view" id="view-sxreports"></div>
     </div>
   </div>
 </div>
