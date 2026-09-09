@@ -1109,7 +1109,12 @@ function renderDepreciation() {
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const fund = S.currentFund;
   const opts = periodOptionsForDepreciation(fund);
-  if (!S.depPeriod || !opts.includes(S.depPeriod)) S.depPeriod = opts[opts.length - 1];
+  if (!S.depPeriod || !opts.includes(S.depPeriod)) {
+    // Default to the latest already-posted period's report; only fall back to the next
+    // due (unposted preview) period if nothing has been posted for this fund yet.
+    const posted = lastPostedPeriod(fund);
+    S.depPeriod = posted && opts.includes(posted) ? posted : opts[opts.length - 1];
+  }
   const period = S.depPeriod;
   const isPosted = !!getPosting(fund, period);
   const jev = jevForPeriod(fund, period);
