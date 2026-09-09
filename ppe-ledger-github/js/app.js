@@ -182,6 +182,10 @@ const S = {
                            // transferAsset() every time an item's location/accountable officer is
                            // transferred; unlike PAR/ICS there's no pending/recorded lifecycle here,
                            // since the transfer itself already happened — see the PTR/ITR section.
+  swaRecords: new Map(),  // id -> Statement of Works Accomplished doc (own collection) — uploaded by
+                           // hand (not auto-generated) with its own Transaction Date/CIP No./SWA No./
+                           // Contractor/Cost plus the actual document file, then optionally matched to
+                           // a specific Construction in Progress billing — see the SWA section.
   linkParIcsId: null,     // set by recordParIcsAsNew() right before opening the Add Item modal — tells
                            // saveAsset() which pending PAR/ICS record to mark "recorded" once the
                            // new asset is created. Reset to null at the top of every openAssetModal()
@@ -196,6 +200,7 @@ const S = {
   cipFilter: { q: "", status: "in_progress" },
   parIcsFilter: { q: "", docType: "", status: "pending" },
   ptrItrFilter: { q: "", docType: "" },
+  swaFilter: { q: "" },
   depPeriod: null,   // chosen period for Monthly Depreciation view
   reconPeriod: null, // chosen period for Reconciliation view
   reconDraft: "",    // unsaved Trial Balance text (pasted or uploaded) not yet tied to a saved period
@@ -452,6 +457,10 @@ function initDb() {
     );
     db.collection("ptr_itr").onSnapshot(
       snap => { S.ptrItr.clear(); snap.docs.forEach(d => S.ptrItr.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
+      err => console.error(err)
+    );
+    db.collection("swa_records").onSnapshot(
+      snap => { S.swaRecords.clear(); snap.docs.forEach(d => S.swaRecords.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
       err => console.error(err)
     );
     // Semi-Expendable Property items live in this same "assets" collection (tagged item_type:
@@ -2026,7 +2035,7 @@ function openCipDetail(id) {
         <tbody>${billings.length ? billings.map((b, i) => `
           <tr>
             <td class="mono">${fmtDate(b.date)}</td>
-            <td>${esc(b.ref)}</td>
+            <td>${esc(b.ref)}${b.swa_id ? ` <span class="pill good" title="Matched to SWA ${esc((S.swaRecords.get(b.swa_id) || {}).swa_no || "")}">SWA</span>` : ""}</td>
             <td class="truncate" title="${esc(b.particulars)}">${esc(b.particulars) || "—"}</td>
             <td class="num mono">${fmtMoney(cipBillingTotal(b))}</td>
             ${!isTransferred ? `<td><button class="btn small ghost" onclick="openCipBillingModal('${p.id}', ${i})">Edit</button></td>` : ""}
@@ -2061,31 +2070,52 @@ async function markCipInProgress(id) {
   openCipDetail(id);
 }
 
-function openCipBillingModal(projectId, index) {
+/** Holds an in-progress Add/Edit Billing form's field values across a round-trip through the
+ *  "Match SWA" picker sub-view — that sub-view fully replaces the modal's content (via openModal),
+ *  so whatever the user had already typed would otherwise be lost when navigating there and back.
+ *  Captured by captureBillingDraft()/set by openMatchSwaModal()/unmatchDraftSwa(), consumed once by
+ *  openCipBillingModal(..., true) on the way back, then left in place (harmless) until the next
+ *  round-trip overwrites it. */
+let _billingDraft = null;
+let _billingDraftCtx = null;
+function openCipBillingModal(projectId, index, useDraft) {
   const p = S.cipProjects.get(projectId);
   if (!p) return;
   const b = index != null ? (p.billings || [])[index] : null;
+  const d = useDraft ? _billingDraft : null;
+  const field = (name, fallback) => (d ? d[name] : (b ? b[name] : undefined)) ?? fallback ?? "";
+  const swaId = d ? d.swa_id : (b ? b.swa_id : "");
+  const swaNo = d ? d.swa_no : (b ? b.swa_no : "");
+  const swa = swaId ? S.swaRecords.get(swaId) : null;
   openModal(`
     <div class="modal-head"><h3>${b ? "Edit billing" : "Add billing"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
       <div class="fieldrow">
-        <div class="field"><label>Transaction date</label><input type="date" id="b_date" value="${b ? b.date || "" : new Date().toISOString().slice(0, 10)}"></div>
-        <div class="field"><label>Billing / DV reference</label><input id="b_ref" value="${esc(b ? b.ref : "")}" placeholder="e.g. 1ST BILLING"></div>
+        <div class="field"><label>Transaction date</label><input type="date" id="b_date" value="${field("date", new Date().toISOString().slice(0, 10))}"></div>
+        <div class="field"><label>Billing / DV reference</label><input id="b_ref" value="${esc(field("ref"))}" placeholder="e.g. 1ST BILLING"></div>
       </div>
-      <div class="field"><label>Particulars</label><textarea id="b_particulars" rows="2">${esc(b ? b.particulars : "")}</textarea></div>
+      <div class="field"><label>Particulars</label><textarea id="b_particulars" rows="2">${esc(field("particulars"))}</textarea></div>
       <div class="fieldrow3">
-        <div class="field"><label>Cost — By Contract (Php)</label><input type="number" step="0.01" id="b_contract" value="${b ? b.by_contract || "" : ""}"></div>
-        <div class="field"><label>Direct Materials (Php)</label><input type="number" step="0.01" id="b_materials" value="${b ? b.admin_materials || "" : ""}"></div>
-        <div class="field"><label>Direct Labor (Php)</label><input type="number" step="0.01" id="b_labor" value="${b ? b.admin_labor || "" : ""}"></div>
+        <div class="field"><label>Cost — By Contract (Php)</label><input type="number" step="0.01" id="b_contract" value="${field("by_contract")}"></div>
+        <div class="field"><label>Direct Materials (Php)</label><input type="number" step="0.01" id="b_materials" value="${field("admin_materials")}"></div>
+        <div class="field"><label>Direct Labor (Php)</label><input type="number" step="0.01" id="b_labor" value="${field("admin_labor")}"></div>
       </div>
       <div class="fieldrow3">
-        <div class="field"><label>Overhead (Php)</label><input type="number" step="0.01" id="b_overhead" value="${b ? b.admin_overhead || "" : ""}"></div>
-        <div class="field"><label>Consultancy (Php)</label><input type="number" step="0.01" id="b_consultancy" value="${b ? b.admin_consultancy || "" : ""}"></div>
-        <div class="field"><label>Others (Php)</label><input type="number" step="0.01" id="b_others" value="${b ? b.admin_others || "" : ""}"></div>
+        <div class="field"><label>Overhead (Php)</label><input type="number" step="0.01" id="b_overhead" value="${field("admin_overhead")}"></div>
+        <div class="field"><label>Consultancy (Php)</label><input type="number" step="0.01" id="b_consultancy" value="${field("admin_consultancy")}"></div>
+        <div class="field"><label>Others (Php)</label><input type="number" step="0.01" id="b_others" value="${field("admin_others")}"></div>
       </div>
       <div class="fieldrow">
-        <div class="field"><label>Transfers / Adjustments (Php)</label><input type="number" step="0.01" id="b_adjust" value="${b ? b.transfers_adjustments || "" : ""}"></div>
-        <div class="field"><label>Remarks</label><input id="b_remarks" value="${esc(b ? b.remarks : "")}"></div>
+        <div class="field"><label>Transfers / Adjustments (Php)</label><input type="number" step="0.01" id="b_adjust" value="${field("transfers_adjustments")}"></div>
+        <div class="field"><label>Remarks</label><input id="b_remarks" value="${esc(field("remarks"))}"></div>
+      </div>
+      <input type="hidden" id="b_swa_id" value="${esc(swaId || "")}">
+      <input type="hidden" id="b_swa_no" value="${esc(swaNo || "")}">
+      <div class="field">
+        <label>Matched SWA <span class="subtle" style="font-weight:400;">(Statement of Works Accomplished)</span></label>
+        ${swaId
+          ? `<div class="banner info" style="margin:0;">${swa ? `SWA ${esc(swa.swa_no)} — ${esc(swa.contractor) || "—"} — ${fmtMoney(swa.cost)}` : `SWA ${esc(swaNo)}`} <a href="#" onclick="unmatchDraftSwa('${p.id}', ${index != null ? index : "null"});return false;" style="margin-left:10px;">Unmatch</a></div>`
+          : `<button type="button" class="btn small" onclick="openMatchSwaModal('${p.id}', ${index != null ? index : "null"})">🔗 Match SWA</button>`}
       </div>
     </div>
     <div class="modal-foot">
@@ -2094,12 +2124,110 @@ function openCipBillingModal(projectId, index) {
       <button class="btn primary" onclick="saveCipBilling('${p.id}', ${index != null ? index : "null"})">${b ? "Save changes" : "Add billing"}</button>
     </div>
   `);
+  _billingDraft = null; _billingDraftCtx = null; // consumed, if it was used
+}
+/** Reads every field currently in the open Add/Edit Billing form into a plain object — used to
+ *  preserve in-progress edits across a round-trip through the "Match SWA" picker sub-view, which
+ *  fully replaces the modal's content. */
+function captureBillingDraft() {
+  return {
+    date: document.getElementById("b_date").value,
+    ref: document.getElementById("b_ref").value,
+    particulars: document.getElementById("b_particulars").value,
+    by_contract: document.getElementById("b_contract").value,
+    admin_materials: document.getElementById("b_materials").value,
+    admin_labor: document.getElementById("b_labor").value,
+    admin_overhead: document.getElementById("b_overhead").value,
+    admin_consultancy: document.getElementById("b_consultancy").value,
+    admin_others: document.getElementById("b_others").value,
+    transfers_adjustments: document.getElementById("b_adjust").value,
+    remarks: document.getElementById("b_remarks").value,
+    swa_id: document.getElementById("b_swa_id").value || "",
+    swa_no: document.getElementById("b_swa_no").value || "",
+  };
+}
+/** Opens the SWA-picker sub-view over the Add/Edit Billing modal — captures the form's current
+ *  values first (see captureBillingDraft) so they survive the round-trip. Defaults the search to
+ *  this project's own CIP No., since that's the most likely match, but the client can search
+ *  further (an SWA's CIP No. field is free text and might not line up exactly). */
+function openMatchSwaModal(projectId, index) {
+  _billingDraft = captureBillingDraft();
+  _billingDraftCtx = { projectId, index };
+  const p = S.cipProjects.get(projectId);
+  openModal(`
+    <div class="modal-head"><h3>Match an uploaded SWA</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p class="subtle" style="margin-top:0;">Pick the Statement of Works Accomplished already uploaded for ${esc(p ? p.cip_code : "this project")} — matching links the two records and fills in Transaction date / Cost — By Contract if those are still blank.</p>
+      <input type="text" id="swaMatchSearch" placeholder="Search SWA No., CIP No., contractor…" value="${esc(p ? p.cip_code : "")}">
+      <div id="swaMatchResults" style="margin-top:10px;"></div>
+      <button class="btn" style="margin-top:12px;" onclick="openCipBillingModal('${projectId}', ${index != null ? index : "null"}, true)">← Back</button>
+    </div>
+  `);
+  document.getElementById("swaMatchSearch").addEventListener("input", e => renderMatchSwaResults(e.target.value));
+  renderMatchSwaResults(p ? p.cip_code : "");
+}
+function renderMatchSwaResults(q) {
+  const el = document.getElementById("swaMatchResults");
+  if (!el) return;
+  const query = (q || "").trim().toLowerCase();
+  let candidates = swaRecordsInFund(S.currentFund).filter(r => !r.matched);
+  if (query) candidates = candidates.filter(r => [r.swa_no, r.cip_no, r.contractor].some(v => v && String(v).toLowerCase().includes(query)));
+  candidates.sort((a, b) => (b.transaction_date || "").localeCompare(a.transaction_date || ""));
+  const shown = candidates.slice(0, 40);
+  el.innerHTML = `<div class="tablewrap" style="max-height:320px;overflow-y:auto;"><table>
+    <thead><tr><th>SWA No.</th><th>CIP No.</th><th>Date</th><th>Contractor</th><th class="num">Cost</th><th></th></tr></thead>
+    <tbody>${shown.length ? shown.map(r => `
+      <tr>
+        <td class="mono">${esc(r.swa_no)}</td>
+        <td class="mono">${esc(r.cip_no) || "—"}</td>
+        <td class="mono">${fmtDate(r.transaction_date)}</td>
+        <td class="truncate">${esc(r.contractor) || "—"}</td>
+        <td class="num mono">${fmtMoney(r.cost)}</td>
+        <td><button class="btn small primary" onclick="pickSwaForBilling('${r.id}')">Match</button></td>
+      </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No unmatched SWA records found${query ? " for this search" : ""}. Upload one from the SWA tab first.</div></td></tr>`}
+    </tbody>
+  </table></div>${candidates.length > shown.length ? `<div class="subtle" style="margin-top:6px;font-size:11px;">Showing the first ${shown.length} of ${candidates.length} — narrow your search to find a specific one.</div>` : ""}`;
+}
+/** Picks an SWA for the billing form currently held in _billingDraft/_billingDraftCtx, pre-filling
+ *  Transaction date / Cost — By Contract only if those draft fields are still blank (never overwrite
+ *  something already typed), then reopens the Add/Edit Billing modal with the updated draft. Nothing
+ *  is written to Firestore yet — the match only becomes real once that modal's own Save is clicked
+ *  (see saveCipBilling), so backing out or cancelling from here has no lasting effect. */
+function pickSwaForBilling(swaId) {
+  const swa = S.swaRecords.get(swaId);
+  if (!swa || !_billingDraftCtx) return;
+  if (swa.matched) return toast("That SWA is already matched to another billing.");
+  const ctx = _billingDraftCtx;
+  const draft = { ..._billingDraft, swa_id: swaId, swa_no: swa.swa_no };
+  // For a brand-new "Add billing" (no existing entry), the date field's shown value is just
+  // today's placeholder default, not something the client actually typed — safe to overwrite with
+  // the SWA's own date. For an existing billing being edited, only fill date/cost in if they're
+  // genuinely still blank, so a real already-saved value is never silently clobbered by a match.
+  if (ctx.index == null || !draft.date) draft.date = swa.transaction_date;
+  if (!draft.by_contract) draft.by_contract = swa.cost;
+  _billingDraft = draft;
+  openCipBillingModal(ctx.projectId, ctx.index, true);
+  toast(`Matched SWA ${swa.swa_no} — review the pre-filled amounts before saving.`);
+}
+/** Clears the SWA match on the currently-open (not-yet-saved) billing form, preserving every other
+ *  field already typed. Like pickSwaForBilling, this only affects the in-progress form — the actual
+ *  swa_records doc isn't touched until Save is clicked on the reopened modal (see saveCipBilling). To
+ *  unmatch an already-saved billing's SWA immediately, use unmatchSwa() from the SWA tab instead. */
+function unmatchDraftSwa(projectId, index) {
+  const draft = captureBillingDraft();
+  draft.swa_id = ""; draft.swa_no = "";
+  _billingDraft = draft;
+  _billingDraftCtx = { projectId, index };
+  openCipBillingModal(projectId, index, true);
 }
 async function saveCipBilling(projectId, index) {
   if (!S.db) return toast("No shared database in this view.");
   const p = S.cipProjects.get(projectId);
   if (!p) return;
+  const b = index != null ? (p.billings || [])[index] : null;
+  const newSwaId = document.getElementById("b_swa_id").value || null;
   const entry = {
+    id: (b && b.id) || uid("cb"),
     date: document.getElementById("b_date").value || new Date().toISOString().slice(0, 10),
     ref: document.getElementById("b_ref").value.trim(),
     particulars: document.getElementById("b_particulars").value.trim(),
@@ -2111,12 +2239,28 @@ async function saveCipBilling(projectId, index) {
     admin_others: round2(Number(document.getElementById("b_others").value) || 0),
     transfers_adjustments: round2(Number(document.getElementById("b_adjust").value) || 0),
     remarks: document.getElementById("b_remarks").value.trim(),
+    swa_id: newSwaId,
     by: viewerLabel(), at: new Date().toISOString(),
   };
   const billings = [...(p.billings || [])];
   if (index != null && index >= 0 && index < billings.length) billings[index] = entry; else billings.push(entry);
+  const prevSwaId = (b && b.swa_id) || null;
   try {
     await S.db.collection("cip_projects").doc(projectId).update({ billings, updated_by: viewerLabel(), updated_at: new Date().toISOString() });
+    // Reconcile the SWA side of the link only if it actually changed — cheap no-op otherwise.
+    if (prevSwaId !== newSwaId) {
+      if (prevSwaId) {
+        const prevSwa = S.swaRecords.get(prevSwaId);
+        // Guard: only clear it if that SWA still actually points back at this exact billing —
+        // avoids clobbering a newer match made on the same SWA since this form was opened.
+        if (prevSwa && prevSwa.matched_billing_id === entry.id) {
+          await S.db.collection("swa_records").doc(prevSwaId).update({ matched: false, matched_project_id: null, matched_billing_id: null, matched_at: null, matched_by: null });
+        }
+      }
+      if (newSwaId) {
+        await S.db.collection("swa_records").doc(newSwaId).update({ matched: true, matched_project_id: projectId, matched_billing_id: entry.id, matched_at: new Date().toISOString(), matched_by: viewerLabel() });
+      }
+    }
     toast("Billing saved.");
     openCipDetail(projectId);
   } catch (e) { console.error(e); toast("Couldn't save — try again."); }
@@ -2125,8 +2269,16 @@ async function deleteCipBilling(projectId, index) {
   const p = S.cipProjects.get(projectId);
   if (!p) return;
   if (!confirm("Delete this billing entry?")) return;
+  const removed = (p.billings || [])[index];
   const billings = (p.billings || []).filter((_, i) => i !== index);
   await S.db.collection("cip_projects").doc(projectId).update({ billings, updated_by: viewerLabel(), updated_at: new Date().toISOString() });
+  // A deleted billing can't stay "matched" to anything — free up its SWA too, same guard as above.
+  if (removed && removed.swa_id) {
+    const swa = S.swaRecords.get(removed.swa_id);
+    if (swa && swa.matched_billing_id === removed.id) {
+      await S.db.collection("swa_records").doc(removed.swa_id).update({ matched: false, matched_project_id: null, matched_billing_id: null, matched_at: null, matched_by: null });
+    }
+  }
   toast("Billing deleted.");
   openCipDetail(projectId);
 }
@@ -2353,6 +2505,7 @@ async function submitCipBulkImport() {
     const bucket = buckets.get(key);
     if (bucket.rec && name && !bucket.rec.name) bucket.rec.name = name;
     bucket.newBillings.push({
+      id: uid("cb"),
       date: parseFlexibleDate(date), ref: ref || "", particulars: name || "",
       by_contract: round2(Number(byContract) || 0), admin_materials: round2(Number(materials) || 0),
       admin_labor: round2(Number(labor) || 0), admin_overhead: round2(Number(overhead) || 0),
@@ -2378,6 +2531,198 @@ async function submitCipBulkImport() {
   }
   toast(`${recognized} billing(s) imported across ${projectsTouched} project(s).`);
   closeModal();
+}
+
+/* ============================================================
+   Statement of Works Accomplished (SWA) — its own "swa_records" collection, fund-scoped like
+   everything else, entirely separate from cip_projects. Unlike PAR/ICS (system-generated numbers,
+   "record" flow) or PTR/ITR (fully auto-generated on Transfer), an SWA is uploaded by hand: the
+   client attaches the actual document plus its own encoded Transaction Date/CIP No./SWA No./
+   Contractor/Cost, since the physical SWA already exists and was issued outside the app. It can
+   then be matched to a specific Construction in Progress billing (from that billing's Add/Edit
+   modal, just above) — matching links the two records and locks the SWA to view/print-only, the
+   same "matched/locked" discipline PAR/ICS's Recorded state already established, so a linked SWA's
+   figures can't silently drift out of step with the billing that copied them. Unmatching (either
+   from here or from that billing's own form) undoes the link without touching the billing's own
+   already-saved cost figures, mirroring unrecordParIcs's "never destroy real activity" reasoning.
+   ============================================================ */
+function swaRecordsInFund(fund) {
+  return [...S.swaRecords.values()].filter(r => (r.fund || "GF") === fund);
+}
+/** True if `number` is already used by a different SWA in this fund — checked before saving so two
+ *  uploads never silently collide. `excludeId` lets an existing record keep its own number unflagged. */
+function swaNumberTaken(fund, number, excludeId) {
+  return swaRecordsInFund(fund).some(r => r.swa_no === number && r.id !== excludeId);
+}
+function filterSwaRows(f) {
+  let rows = swaRecordsInFund(S.currentFund);
+  if (f.q) {
+    const q = f.q.toLowerCase();
+    rows = rows.filter(r => [r.swa_no, r.cip_no, r.contractor].some(v => v && String(v).toLowerCase().includes(q)));
+  }
+  rows.sort((a, b) => (b.transaction_date || "").localeCompare(a.transaction_date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
+  return rows;
+}
+/** Summary CSV of SWA records — respects the tab's current search filter, same pattern as every
+ *  other tab's CSV export in the app. */
+function exportSwaCsv() {
+  const rows = filterSwaRows(S.swaFilter);
+  const out = [["Fund", "SWA No.", "CIP No.", "Transaction Date", "Contractor", "Cost", "Status", "Matched Project CIP No.", "Has Document"]];
+  rows.forEach(r => {
+    const proj = r.matched_project_id ? S.cipProjects.get(r.matched_project_id) : null;
+    out.push([
+      fundLabel(r.fund || "GF"), r.swa_no || "", r.cip_no || "", r.transaction_date || "",
+      r.contractor || "", (r.cost || 0).toFixed(2), r.matched ? "Matched" : "Unmatched",
+      proj ? (proj.cip_code || "") : "", r.document_url ? "Yes" : "No",
+    ]);
+  });
+  const csv = out.map(r => r.map(csvField).join(",")).join("\n");
+  browserDownload(`SWA_Summary_${S.currentFund}_${new Date().toISOString().slice(0, 10)}.csv`, csv, "text/csv;charset=utf-8;");
+  toast("Saved.");
+}
+function renderSwa() {
+  const el = document.getElementById("view-swa");
+  if (!el) return; // older index.html without the SWA nav tab/container — nothing to render into
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const focus = captureFocus("view-swa");
+  const f = S.swaFilter;
+  const rows = filterSwaRows(f);
+  el.innerHTML = `
+    <div class="banner info" style="margin-bottom:14px;">Upload a Statement of Works Accomplished (SWA) here, then match it to a Construction in Progress billing from that billing's Add/Edit screen (Construction in Progress → open a project → Add/Edit billing → "🔗 Match SWA"). Matching links the two records and locks the SWA to view/print-only until Unmatched.</div>
+    <div class="panel">
+      <div class="toolbar">
+        <input type="text" class="grow" id="swaSearch" placeholder="Search SWA No., CIP No., contractor…" value="${esc(f.q)}">
+        <span style="flex:1"></span>
+        <button class="btn" onclick="exportSwaCsv()">Download CSV</button>
+        <button class="btn primary" onclick="openSwaModal()">+ Upload SWA</button>
+      </div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>SWA No.</th><th>CIP No.</th><th>Transaction Date</th><th>Contractor</th><th class="num">Cost</th><th>Document</th><th>Status</th><th style="width:190px;">Actions</th></tr></thead>
+        <tbody>${rows.length ? rows.map(r => {
+          const proj = r.matched_project_id ? S.cipProjects.get(r.matched_project_id) : null;
+          return `<tr>
+            <td class="mono">${esc(r.swa_no)}</td>
+            <td class="mono">${esc(r.cip_no) || "—"}</td>
+            <td class="mono">${fmtDate(r.transaction_date)}</td>
+            <td class="truncate">${esc(r.contractor) || "—"}</td>
+            <td class="num mono">${fmtMoney(r.cost)}</td>
+            <td>${r.document_url ? `<a href="${esc(r.document_url)}" target="_blank" rel="noopener">${esc(r.document_name || "View")}</a>` : "—"}</td>
+            <td>${r.matched ? '<span class="pill good">Matched</span>' : '<span class="pill warn">Unmatched</span>'}</td>
+            <td>
+              ${r.matched
+                ? `${proj ? `<a href="#" onclick="openCipDetail('${proj.id}');return false;" style="font-size:11px;margin-right:8px;">view project</a>` : ""}
+                   <button class="btn small ghost" onclick="unmatchSwa('${r.id}')">↩ Unmatch</button>`
+                : `<button class="btn small" style="margin-right:4px;" onclick="openSwaModal('${r.id}')">Edit</button>
+                   <button class="btn small danger" onclick="deleteSwa('${r.id}')">Delete</button>`}
+            </td>
+          </tr>`;
+        }).join("") : `<tr><td colspan="8"><div class="empty">No SWA records uploaded yet.</div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>
+  `;
+  document.getElementById("swaSearch").addEventListener("input", e => { S.swaFilter.q = e.target.value; renderSwa(); });
+  restoreFocus(focus);
+}
+function openSwaModal(existingId) {
+  const r = existingId ? S.swaRecords.get(existingId) : null;
+  if (r && r.matched) return toast("This SWA is matched to a billing — Unmatch it first to edit.");
+  const fund = r ? (r.fund || "GF") : S.currentFund;
+  openModal(`
+    <div class="modal-head"><h3>${r ? "Edit SWA" : "Upload SWA"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p class="subtle" style="margin-top:0;">Upload the Statement of Works Accomplished document, encoded with its own reference details. Once matched to a Construction in Progress billing, this record locks to view/print-only until Unmatched.</p>
+      <div class="fieldrow">
+        <div class="field"><label>Fund</label><select id="s_fund">${FUNDS.map(fu => `<option value="${fu.code}" ${fund === fu.code ? "selected" : ""}>${esc(fu.label)}</option>`).join("")}</select></div>
+        <div class="field"><label>Transaction Date</label><input type="date" id="s_date" value="${r ? r.transaction_date : new Date().toISOString().slice(0, 10)}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>CIP No.</label><input id="s_cip" list="s_cip_list" value="${esc(r ? r.cip_no : "")}" placeholder="e.g. 2025-020-01"></div>
+        <div class="field"><label>SWA No.</label><input id="s_no" class="mono" value="${esc(r ? r.swa_no : "")}" placeholder="e.g. SWA-2026-05-0001"></div>
+      </div>
+      <datalist id="s_cip_list">${cipProjectsInFund(fund).map(p => `<option value="${esc(p.cip_code)}">`).join("")}</datalist>
+      <div class="fieldrow">
+        <div class="field"><label>Contractor</label><input id="s_contractor" value="${esc(r ? r.contractor : "")}"></div>
+        <div class="field"><label>Cost (Php)</label><input type="number" step="0.01" id="s_cost" value="${r ? r.cost || "" : ""}"></div>
+      </div>
+      <div class="field"><label class="subtle" style="font-size:11px;">SWA document${r && r.document_url ? " (replace)" : ""}</label><input type="file" id="s_document" accept="image/*,.pdf"></div>
+      ${r && r.document_url ? `<div><a href="${esc(r.document_url)}" target="_blank" rel="noopener">${esc(r.document_name || "View current document")}</a></div>` : ""}
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" id="s_saveBtn" onclick="saveSwa(${r ? `'${r.id}'` : "null"})">${r ? "Save changes" : "Upload"}</button>
+    </div>
+  `);
+}
+async function saveSwa(existingId) {
+  if (!S.db) return toast("No shared database in this view.");
+  const existing = existingId ? S.swaRecords.get(existingId) : null;
+  const fund = document.getElementById("s_fund").value;
+  const number = document.getElementById("s_no").value.trim();
+  if (!number) return toast("Enter the SWA No.");
+  if (swaNumberTaken(fund, number, existingId)) return toast(`SWA No. ${number} is already used by another SWA in this fund.`);
+  const rec = {
+    fund,
+    transaction_date: document.getElementById("s_date").value || new Date().toISOString().slice(0, 10),
+    cip_no: document.getElementById("s_cip").value.trim(),
+    swa_no: number,
+    contractor: document.getElementById("s_contractor").value.trim(),
+    cost: round2(Number(document.getElementById("s_cost").value) || 0),
+    updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+  };
+  const file = document.getElementById("s_document").files[0];
+  const saveBtn = document.getElementById("s_saveBtn");
+  if (file) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
+  try {
+    let id = existingId;
+    if (existingId) {
+      await S.db.collection("swa_records").doc(existingId).update(rec);
+    } else {
+      rec.matched = false;
+      rec.created_by = viewerLabel(); rec.created_at = new Date().toISOString();
+      const ref = await S.db.collection("swa_records").add(rec);
+      id = ref.id;
+    }
+    // Document upload after the doc exists, so a brand-new SWA has an ID to key its Storage path
+    // on — same "create doc first, then attach" pattern used for asset photos/documents.
+    if (file) {
+      if (existing && existing.document_path) await deleteFile(existing.document_path);
+      const ext = (file.name.split(".").pop() || "pdf").toLowerCase();
+      const { url, path } = await uploadFile(`swa/${id}/document_${Date.now()}.${ext}`, file);
+      await S.db.collection("swa_records").doc(id).update({ document_url: url, document_path: path, document_name: file.name });
+    }
+    toast(existingId ? "SWA updated." : "SWA uploaded.");
+    closeModal();
+  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+}
+async function deleteSwa(id) {
+  const r = S.swaRecords.get(id);
+  if (!r) return;
+  if (r.matched) return toast("This SWA is matched to a billing — Unmatch it first to delete.");
+  if (!confirm(`Delete SWA ${r.swa_no}? This can't be undone.`)) return;
+  if (r.document_path) await deleteFile(r.document_path);
+  await S.db.collection("swa_records").doc(id).delete();
+  toast("SWA deleted.");
+}
+/** Undoes a Match — puts the SWA back to Unmatched (for a wrong match, or to free it up for a
+ *  different billing), without touching the CIP billing's own already-saved cost figures — only the
+ *  link itself is undone, mirroring unrecordParIcs's "never destroy real activity" reasoning. Also
+ *  clears the billing entry's own swa_id back-reference, but only if that billing still actually
+ *  points at this SWA (a defensive guard against clobbering a newer match made since). */
+async function unmatchSwa(id) {
+  const r = S.swaRecords.get(id);
+  if (!r || !r.matched) return;
+  if (!confirm(`Unmatch SWA ${r.swa_no}? The linked billing's own cost figures stay as they are — only the link is undone.`)) return;
+  await S.db.collection("swa_records").doc(id).update({
+    matched: false, matched_project_id: null, matched_billing_id: null, matched_at: null, matched_by: null,
+    unmatched_at: new Date().toISOString(), unmatched_by: viewerLabel(),
+  });
+  const p = r.matched_project_id ? S.cipProjects.get(r.matched_project_id) : null;
+  if (p && p.billings && p.billings.some(b => b.swa_id === id)) {
+    const billings = p.billings.map(b => b.swa_id === id ? { ...b, swa_id: null } : b);
+    await S.db.collection("cip_projects").doc(p.id).update({ billings, updated_by: viewerLabel(), updated_at: new Date().toISOString() });
+  }
+  toast("Unmatched.");
 }
 
 /* ============================================================
@@ -4144,6 +4489,7 @@ function renderAll() {
   renderCip();
   renderParIcs();
   renderPtrItr();
+  renderSwa();
 }
 function renderPeriodStatus() {
   const last = lastPostedPeriod(S.currentFund);
@@ -4160,6 +4506,7 @@ const VIEW_TITLES = {
   cip: ["Construction in Progress", "Track CIP projects and their billings, separate from the Asset Register, until each is completed and transferred to PPE"],
   parics: ["PAR / ICS", "Generate a Property Acknowledgment Receipt (PPE) or Inventory Custodian Slip (Semi-Expendable) — saved as a pending record until you record it into the Asset Register"],
   ptritr: ["PTR / ITR", "Property Transfer Report (PPE) or Inventory Transfer Report (Semi-Expendable) — generated automatically whenever an item's location or accountable officer is transferred"],
+  swa: ["SWA", "Statement of Works Accomplished — upload the document, then match it to a Construction in Progress billing"],
 };
 /** Sets the topbar title/subtitle from the current view + fund. Called on both view changes and
  *  fund switches, since the subtitle always names which fund's books are showing. */
@@ -4251,4 +4598,5 @@ Object.assign(window, {
   openParModal, openIcsModal, saveParIcs, deleteParIcs, printPar, printIcs, exportParIcsCsv,
   recordParIcsChoice, recordParIcsAsNew, openMatchParIcsModal, matchParIcsToExisting, unrecordParIcs,
   printPtr, printItr, exportPtrItrCsv, openEditPtrItrModal, savePtrItrEdit,
+  openSwaModal, saveSwa, deleteSwa, unmatchSwa, exportSwaCsv, openMatchSwaModal, pickSwaForBilling, unmatchDraftSwa,
 });
