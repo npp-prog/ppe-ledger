@@ -731,6 +731,8 @@ function assetCategoryOptions(selectedCode) {
  *  `prefill`, when given (only for a brand-new item — recordParIcsAsNew() is the one caller that passes
  *  it), pre-populates the common fields from a pending PAR/ICS record and locks the Item Type the
  *  same way editing does, since the record already committed it (PAR → PPE, ICS → Semi-Expendable).
+ *  `prefill.accountable_officer` carries over the PAR/ICS's "Received by" name — the person who
+ *  received the item is treated as its accountable officer/custodian from the moment it's recorded.
  *  `prefill.parIcsId` is what tells saveAsset() which PAR/ICS record to mark "recorded" once the new
  *  asset is actually created — see S.linkParIcsId. */
 function openAssetModal(existingId, initialType, prefill) {
@@ -783,7 +785,7 @@ function openAssetModal(existingId, initialType, prefill) {
 
       <div class="fieldrow">
         <div class="field"><label>Location / Office</label><input id="f_loc" value="${esc(a ? a.location : (pf.location || ""))}"></div>
-        <div class="field"><label>Accountable officer</label><input id="f_officer" value="${esc(a ? a.accountable_officer : "")}"></div>
+        <div class="field"><label>Accountable officer</label><input id="f_officer" value="${esc(a ? a.accountable_officer : (pf.accountable_officer || ""))}"></div>
       </div>
 
       <div id="f_block_ppe_cost">
@@ -2704,8 +2706,7 @@ function openParModal(existingId) {
         <div class="field"><label>Unit</label><input id="p_unit" value="${esc(r ? r.unit : "UNIT")}"></div>
         <div class="field"><label>Amount (Php)</label><input type="number" step="0.01" id="p_amount" value="${r ? r.amount : ""}"></div>
       </div>
-      <div class="field"><label>Description</label><textarea id="p_desc" rows="2">${esc(r ? r.description : "")}</textarea></div>
-      <div class="field"><label>Additional specs <span class="subtle" style="font-weight:400;">(one per line, optional — prints as extra description lines, like the reference form's spec list)</span></label><textarea id="p_detail" rows="3" placeholder="e.g. Color: Starlight&#10;Apple M5 chip&#10;16GB MEMORY, 512GB SSD">${esc(r && r.detail_lines ? r.detail_lines.join("\n") : "")}</textarea></div>
+      <div class="field"><label>Description <span class="subtle" style="font-weight:400;">(one line per row — the first line is the main description, additional lines print as extra spec rows, like the reference form's spec list)</span></label><textarea id="p_desc" rows="4" placeholder="e.g. MacBook Air (13-inch, M5)&#10;Color: Starlight&#10;Apple M5 chip&#10;16GB MEMORY, 512GB SSD">${esc(r ? [r.description, ...(r.detail_lines || [])].filter(Boolean).join("\n") : "")}</textarea></div>
       <div class="fieldrow">
         <div class="field"><label>Property Number <span class="subtle" style="font-weight:400;">(optional — can assign when recorded)</span></label><input id="p_propnum" value="${esc(r ? r.property_number : "")}"></div>
         <div class="field"><label>Date Acquired</label><input type="date" id="p_dateacq" value="${r ? r.date_acquired || "" : ""}"></div>
@@ -2747,8 +2748,7 @@ function openIcsModal(existingId) {
         <div class="field"><label>Unit Cost (Php)</label><input type="number" step="0.01" id="i_unitcost" value="${r ? r.unit_cost : ""}"></div>
       </div>
       <div class="field"><label>Total Cost (Php)</label><input type="number" step="0.01" id="i_cost" value="${r ? r.cost : ""}"></div>
-      <div class="field"><label>Description</label><textarea id="i_desc" rows="2">${esc(r ? r.description : "")}</textarea></div>
-      <div class="field"><label>Additional specs <span class="subtle" style="font-weight:400;">(one per line, optional)</span></label><textarea id="i_detail" rows="2" placeholder="e.g. COLOR: GRAY">${esc(r && r.detail_lines ? r.detail_lines.join("\n") : "")}</textarea></div>
+      <div class="field"><label>Description <span class="subtle" style="font-weight:400;">(one line per row — the first line is the main description, additional lines print as extra spec rows)</span></label><textarea id="i_desc" rows="3" placeholder="e.g. LOCKER CABINET&#10;COLOR: GRAY">${esc(r ? [r.description, ...(r.detail_lines || [])].filter(Boolean).join("\n") : "")}</textarea></div>
       <div class="fieldrow">
         <div class="field"><label>Item No. <span class="subtle" style="font-weight:400;">(optional — can assign when recorded)</span></label><input id="i_itemno" value="${esc(r ? r.item_no : "")}"></div>
         <div class="field"><label>Estimated Useful Life</label><input id="i_life" value="${esc(r ? r.estimated_useful_life : "")}" placeholder="e.g. 3 YEARS"></div>
@@ -2794,13 +2794,14 @@ async function saveParIcs(docType, existingId) {
       const fund = document.getElementById("p_fund").value;
       const date = document.getElementById("p_date").value || new Date().toISOString().slice(0, 10);
       const deptOffice = document.getElementById("p_dept").value.trim();
-      const description = document.getElementById("p_desc").value.trim();
+      const descLines = document.getElementById("p_desc").value.split("\n").map(s => s.trim()).filter(Boolean);
+      const description = descLines[0] || "";
+      const detailLines = descLines.slice(1);
       if (!deptOffice) return toast("Enter the Dept/Office.");
       if (!description) return toast("Enter a description.");
       const enteredNumber = document.getElementById("p_number").value.trim();
       const number = enteredNumber || (existing ? existing.number : nextParNumber(fund, date));
       if (parIcsNumberTaken(fund, "par", number, existingId)) return toast(`PAR No. ${number} is already used by another PAR in this fund.`);
-      const detailLines = document.getElementById("p_detail").value.split("\n").map(s => s.trim()).filter(Boolean);
       const rec = {
         doc_type: "par", fund, date, number,
         dept_office: deptOffice,
@@ -2829,10 +2830,11 @@ async function saveParIcs(docType, existingId) {
       const fund = document.getElementById("i_fund").value;
       const date = document.getElementById("i_date").value || new Date().toISOString().slice(0, 10);
       const entityName = document.getElementById("i_entity").value.trim();
-      const description = document.getElementById("i_desc").value.trim();
+      const descLines = document.getElementById("i_desc").value.split("\n").map(s => s.trim()).filter(Boolean);
+      const description = descLines[0] || "";
+      const detailLines = descLines.slice(1);
       if (!entityName) return toast("Enter the Entity Name.");
       if (!description) return toast("Enter a description.");
-      const detailLines = document.getElementById("i_detail").value.split("\n").map(s => s.trim()).filter(Boolean);
       const cost = round2(Number(document.getElementById("i_cost").value) || 0);
       const classification = sxClassificationOf({ cost });
       const enteredNumber = document.getElementById("i_number").value.trim();
@@ -2912,6 +2914,7 @@ function recordParIcsAsNew(id) {
         parIcsId: id, recordLabel: `PAR ${r.number}`, itemType: "ppe", fund: r.fund,
         property_id: r.property_number || "", date_acquired: r.date_acquired || r.date,
         description: r.description, location: r.dept_office, cost: r.amount,
+        accountable_officer: r.received_by_name || "",
         remarks: `PAR No. ${r.number}`,
       }
     : {
@@ -2919,6 +2922,7 @@ function recordParIcsAsNew(id) {
         property_id: r.item_no || "", date_acquired: r.date,
         description: r.description, location: r.entity_name,
         qty: r.qty, unit_cost: r.unit_cost, cost: r.cost, unit_of_measure: r.unit,
+        accountable_officer: r.received_by_name || "",
         sen: r.number, remarks: `ICS No. ${r.number}`,
       };
   openAssetModal(null, prefill.itemType, prefill);
