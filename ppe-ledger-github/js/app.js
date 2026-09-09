@@ -1151,7 +1151,7 @@ function openAssetDetail(id) {
       ${a.status === "active" && isSx ? `<button class="btn" onclick="openSxLedgerEntryModal('${a.id}')">Add ledger entry</button>` : ""}
       <button class="btn primary" onclick="openAssetModal('${a.id}')">Edit</button>
     </div>
-  `);
+  `, "wide");
   renderAssetQr(a);
 }
 /** Renders a small on-screen QR into the asset-detail modal's #assetQrBox, encoding enough to
@@ -3713,8 +3713,13 @@ function setFund(fund) {
   renderAll();
 }
 /* ---------- modal helpers ---------- */
-function openModal(html) {
+/** `extraClass`, when given (e.g. "wide"), is added alongside the base "modal" class — used by
+ *  views like the asset-detail modal whose modal-foot carries a lot of action buttons and needs
+ *  more room to lay them out on one row before they wrap (see .modal.wide in styles.css). Always
+ *  resets the class list first so a previous call's extra class never leaks onto the next modal. */
+function openModal(html, extraClass) {
   document.getElementById("modalRoot").innerHTML = html;
+  document.getElementById("modalRoot").className = "modal" + (extraClass ? " " + extraClass : "");
   document.getElementById("modalOverlay").classList.add("open");
 }
 function closeModal() { document.getElementById("modalOverlay").classList.remove("open"); }
