@@ -67,11 +67,13 @@
       <button data-view="ptritr"><span class="ico">08</span><span class="label">PTR / ITR</span></button>
       <button data-view="swa"><span class="ico">09</span><span class="label">SWA</span></button>
       <button data-view="retired"><span class="ico">10</span><span class="label">Retired Assets</span></button>
+      <button data-view="users" hidden><span class="ico">11</span><span class="label">Users &amp; Roles</span></button>
     </nav>
     <div class="sidebar-foot">
       <div>Signed in as</div>
       <div class="auth-chip">
         <span class="email" id="authEmail">&mdash;</span>
+        <button class="btn small ghost" id="changePasswordBtn" type="button">Change password</button>
         <button class="btn small ghost" id="signOutBtn" type="button">Sign out</button>
       </div>
     </div>
@@ -99,6 +101,7 @@
       <div class="view" id="view-ptritr"></div>
       <div class="view" id="view-swa"></div>
       <div class="view" id="view-retired"></div>
+      <div class="view" id="view-users"></div>
     </div>
   </div>
 </div>
