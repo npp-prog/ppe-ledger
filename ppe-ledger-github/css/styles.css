@@ -198,10 +198,12 @@
   .overlay{ position:fixed; inset:0; background:rgba(20,26,23,.45); display:none; align-items:flex-start; justify-content:center; z-index:50; padding:5vh 16px; overflow-y:auto; }
   .overlay.open{ display:flex; }
   .modal{ background:var(--paper-raised); border-radius:var(--radius); box-shadow:var(--shadow); width:100%; max-width:640px; margin:auto; border:1px solid var(--line); }
+  .modal.wide{ max-width:760px; }
   .modal-head{ display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid var(--line-soft); }
   .modal-head h3{ margin:0; font-size:16px; }
   .modal-body{ padding:18px 20px; max-height:70vh; overflow-y:auto; }
-  .modal-foot{ padding:14px 20px; border-top:1px solid var(--line-soft); display:flex; justify-content:flex-end; gap:8px; }
+  .modal-foot{ padding:14px 20px; border-top:1px solid var(--line-soft); display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px 8px; }
+  .modal-foot .btn{ flex:0 0 auto; }
 
   .empty{ text-align:center; padding:40px 20px; color:var(--ink-soft); }
   .empty .big{ font-size:32px; margin-bottom:8px; }
