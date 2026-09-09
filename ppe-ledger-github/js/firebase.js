@@ -11,6 +11,7 @@ import {
   getAuth, onAuthStateChanged,
   signInWithEmailAndPassword, signOut, sendPasswordResetEmail,
   GoogleAuthProvider, signInWithPopup,
+  updatePassword, reauthenticateWithCredential, EmailAuthProvider,
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-auth.js";
 import {
   getFirestore,
@@ -47,6 +48,17 @@ export async function resetPassword(email) {
 }
 export async function signOutUser() {
   await signOut(auth);
+}
+/** Self-service password change for an already-signed-in email/password user. Firebase requires
+ *  a "recent login" before it'll let you change a password, so this reauthenticates with the
+ *  current password first — that's also a good gate on its own (proves the caller actually knows
+ *  the old password) before accepting the new one. */
+export async function changePassword(currentPassword, newPassword) {
+  const user = auth.currentUser;
+  if (!user) throw new Error("Not signed in.");
+  const cred = EmailAuthProvider.credential(user.email, currentPassword);
+  await reauthenticateWithCredential(user, cred);
+  await updatePassword(user, newPassword);
 }
 
 // ---- Firestore adapter (mirrors the tiny API app.js expects) ----
