@@ -265,6 +265,33 @@ function cipBillingTotal(b) {
 }
 function cipProjectTotal(p) { return round2((p.billings || []).reduce((s, b) => s + cipBillingTotal(b), 0)); }
 
+/** True once any billing on this project reads as a final one (its ref/particulars/remarks
+ *  mentions "final" — matches how these billings are actually labeled in practice, e.g. "2ND &
+ *  FINAL BILLING"). Used to auto-flag a project as physically finished/awaiting transfer without
+ *  requiring anyone to click a button — including projects whose billings were bulk-imported
+ *  before this existed, since it's computed from the billing text rather than a stored flag. */
+function cipHasFinalBilling(p) {
+  const re = /\bfinal\b/i;
+  return (p.billings || []).some(b => re.test(b.ref || "") || re.test(b.particulars || "") || re.test(b.remarks || ""));
+}
+/** The project's real status for display/filtering — three states: "in_progress", "finished"
+ *  (construction done, awaiting capitalization — auto-detected from a final billing, or set/
+ *  cleared manually via `status_override`), and "completed" (transferred to a PPE asset — the
+ *  one status value ever written by completeCipProject(), and always authoritative once set). */
+function effectiveCipStatus(p) {
+  if (p.status === "completed") return "completed";
+  if (p.status_override) return p.status_override;
+  return cipHasFinalBilling(p) ? "finished" : "in_progress";
+}
+function cipStatusPill(status) {
+  if (status === "completed") return '<span class="pill neutral">Transferred</span>';
+  if (status === "finished") return '<span class="pill warn">Complete</span>';
+  return '<span class="pill good">In progress</span>';
+}
+function cipStatusLabel(status) {
+  return status === "completed" ? "Transferred" : status === "finished" ? "Complete (awaiting transfer)" : "In progress";
+}
+
 /* ---------- Reconciliation engine ---------- */
 /** distinct {code,name} cost accounts actually used in one fund's active register, sorted by
  *  code — includes CIP account codes with an in-progress project even though those projects no
@@ -425,7 +452,7 @@ function renderDashboard() {
       <div class="card"><div class="label">Accumulated Depreciation</div><div class="value">${fmtMoney(totalAD)}</div><div class="foot">as of ${last ? periodShort(last) : periodShort(BASELINE_PERIOD)}</div></div>
       <div class="card"><div class="label">Carrying Amount</div><div class="value">${fmtMoney(totalCarrying)}</div><div class="foot">net book value, all classes</div></div>
       <div class="card"><div class="label">Reconciliation</div><div class="value" style="color:${flags.length ? "var(--bad)" : "var(--good)"}">${latestTbPeriod ? flags.length + " to check" : "—"}</div><div class="foot">${latestTbPeriod ? okCount + " accounts tie out • " + periodShort(latestTbPeriod) : "No Trial Balance loaded yet"}</div></div>
-      <div class="card"><div class="label">Construction in Progress</div><div class="value">${fmtMoney(cipTotal)}</div><div class="foot">${cipInProgress.length} project(s) in progress · <a href="#" onclick="setView('cip');return false;">view</a></div></div>
+      <div class="card"><div class="label">Construction in Progress</div><div class="value">${fmtMoney(cipTotal)}</div><div class="foot">${cipInProgress.length} project(s) not yet transferred · <a href="#" onclick="setView('cip');return false;">view</a></div></div>
     </div>
 
     <div class="panel">
@@ -1415,7 +1442,7 @@ function cipAccountOptions(selectedCode) {
 }
 function cipProjectsFiltered(f) {
   let rows = cipProjectsInFund(S.currentFund);
-  if (f.status !== "all") rows = rows.filter(p => (p.status || "in_progress") === f.status);
+  if (f.status !== "all") rows = rows.filter(p => effectiveCipStatus(p) === f.status);
   if (f.q) {
     const q = f.q.toLowerCase();
     rows = rows.filter(p => [p.cip_code, p.name, p.contractor, p.location].some(v => (v || "").toLowerCase().includes(q)));
@@ -1435,7 +1462,8 @@ function renderCip() {
         <input type="text" class="grow" id="cipSearch" placeholder="Search CIP code, project name, contractor, location…" value="${esc(f.q)}">
         <select id="cipStatus">
           <option value="in_progress" ${f.status === "in_progress" ? "selected" : ""}>In progress</option>
-          <option value="completed" ${f.status === "completed" ? "selected" : ""}>Completed / transferred</option>
+          <option value="finished" ${f.status === "finished" ? "selected" : ""}>Complete — awaiting transfer</option>
+          <option value="completed" ${f.status === "completed" ? "selected" : ""}>Transferred</option>
           <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
         </select>
         <span style="flex:1"></span>
@@ -1453,7 +1481,7 @@ function renderCip() {
             <td class="truncate" title="${esc(p.name)}">${esc(p.name) || "—"}</td>
             <td class="truncate">${esc(p.contractor) || "—"}</td>
             <td class="num mono">${fmtMoney(cipProjectTotal(p))}</td>
-            <td>${p.status === "completed" ? '<span class="pill neutral">Completed</span>' : '<span class="pill good">In progress</span>'}</td>
+            <td>${cipStatusPill(effectiveCipStatus(p))}</td>
           </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No CIP projects match these filters.</div></td></tr>`}
         </tbody>
       </table></div></div>
@@ -1466,7 +1494,7 @@ function exportCipCsv() {
   const rows = cipProjectsFiltered(S.cipFilter);
   const out = [["Fund", "CIP No.", "Account Code", "Account Name", "Name of Project", "Location", "Contractor", "Contract Period", "Project Cost", "Total Billed to Date", "Status"]];
   rows.forEach(p => out.push([fundLabel(p.fund || "GF"), p.cip_code || "", p.account_code || "", p.account_name || "", p.name || "",
-    p.location || "", p.contractor || "", p.contract_period || "", (p.project_cost || 0).toFixed(2), cipProjectTotal(p).toFixed(2), p.status || "in_progress"]));
+    p.location || "", p.contractor || "", p.contract_period || "", (p.project_cost || 0).toFixed(2), cipProjectTotal(p).toFixed(2), cipStatusLabel(effectiveCipStatus(p))]));
   const csv = out.map(r => r.map(csvField).join(",")).join("\n");
   browserDownload(`CIP_Projects_${S.currentFund}_${new Date().toISOString().slice(0, 10)}.csv`, csv, "text/csv;charset=utf-8;");
   toast("Saved.");
@@ -1535,7 +1563,9 @@ function openCipDetail(id) {
   if (!p) return;
   const billings = p.billings || [];
   const total = cipProjectTotal(p);
-  const isCompleted = p.status === "completed";
+  const status = effectiveCipStatus(p);
+  const isTransferred = status === "completed";
+  const isFinished = status === "finished";
   openModal(`
     <div class="modal-head"><h3>${esc(p.cip_code) || "CIP Project"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
@@ -1548,34 +1578,53 @@ function openCipDetail(id) {
         <dt>Contract Period</dt><dd>${esc(p.contract_period) || "—"}</dd>
         <dt>Project Cost</dt><dd class="mono">${p.project_cost ? fmtMoney(p.project_cost) : "—"}</dd>
         <dt>Total billed to date</dt><dd class="mono">${fmtMoney(total)}</dd>
-        <dt>Status</dt><dd>${isCompleted ? '<span class="pill neutral">Completed</span>' : '<span class="pill good">In progress</span>'}</dd>
+        <dt>Status</dt><dd>${cipStatusPill(status)}</dd>
       </div>
-      ${isCompleted ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">Transferred to the Asset Register ${fmtDate(p.transferred_at ? p.transferred_at.slice(0, 10) : "")}${p.transferred_by ? " by " + esc(p.transferred_by) : ""}. <a href="#" onclick="closeModal();openAssetDetail('${p.transferred_asset_id}');return false;">View the asset →</a></p>` : ""}
+      ${isFinished ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">${p.status_override === "finished" ? "Marked complete" : "A billing here reads as the final one"} — construction looks done, but it hasn't been transferred into a PPE asset yet. Not right? <a href="#" onclick="markCipInProgress('${p.id}');return false;">Mark back in progress</a>.</p>` : ""}
+      ${isTransferred ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">Transferred to the Asset Register ${fmtDate(p.transferred_at ? p.transferred_at.slice(0, 10) : "")}${p.transferred_by ? " by " + esc(p.transferred_by) : ""}. <a href="#" onclick="closeModal();openAssetDetail('${p.transferred_asset_id}');return false;">View the asset →</a></p>` : ""}
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
         <label style="margin:0;">Billings</label>
-        ${!isCompleted ? `<button class="btn small" onclick="openCipBillingModal('${p.id}')">+ Add billing</button>` : ""}
+        ${!isTransferred ? `<button class="btn small" onclick="openCipBillingModal('${p.id}')">+ Add billing</button>` : ""}
       </div>
       <div class="tablewrap"><table style="font-size:12px;">
-        <thead><tr><th>Date</th><th>Ref.</th><th>Particulars</th><th class="num">Total</th>${!isCompleted ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Date</th><th>Ref.</th><th>Particulars</th><th class="num">Total</th>${!isTransferred ? "<th></th>" : ""}</tr></thead>
         <tbody>${billings.length ? billings.map((b, i) => `
           <tr>
             <td class="mono">${fmtDate(b.date)}</td>
             <td>${esc(b.ref)}</td>
             <td class="truncate" title="${esc(b.particulars)}">${esc(b.particulars) || "—"}</td>
             <td class="num mono">${fmtMoney(cipBillingTotal(b))}</td>
-            ${!isCompleted ? `<td><button class="btn small ghost" onclick="openCipBillingModal('${p.id}', ${i})">Edit</button></td>` : ""}
-          </tr>`).join("") : `<tr><td colspan="${isCompleted ? 4 : 5}"><div class="empty">No billings recorded yet.</div></td></tr>`}
+            ${!isTransferred ? `<td><button class="btn small ghost" onclick="openCipBillingModal('${p.id}', ${i})">Edit</button></td>` : ""}
+          </tr>`).join("") : `<tr><td colspan="${isTransferred ? 4 : 5}"><div class="empty">No billings recorded yet.</div></td></tr>`}
         </tbody>
       </table></div>
     </div>
     <div class="modal-foot">
       <button class="btn ghost" onclick="closeModal()">Close</button>
       <button class="btn" onclick="printCipLedgerCard('${p.id}')">Ledger Card</button>
-      ${!isCompleted ? `<button class="btn" onclick="openCipProjectModal('${p.id}')">Edit</button>` : ""}
-      ${!isCompleted ? `<button class="btn primary" onclick="openCipCompleteModal('${p.id}')">Complete → transfer to PPE</button>` : ""}
+      ${!isTransferred ? `<button class="btn" onclick="openCipProjectModal('${p.id}')">Edit</button>` : ""}
+      ${status === "in_progress" ? `<button class="btn" onclick="markCipComplete('${p.id}')">Mark complete</button>` : ""}
+      ${!isTransferred ? `<button class="btn primary" onclick="openCipCompleteModal('${p.id}')">Complete → transfer to PPE</button>` : ""}
     </div>
   `);
+}
+/** Manual overrides for cipHasFinalBilling()'s auto-detection — for a project whose billing text
+ *  doesn't happen to say "final" but is in fact done, or the reverse (a billing mentions "final"
+ *  but more billings are actually still expected). Stored separately from `status` (which stays
+ *  reserved for "transferred to PPE", written only by completeCipProject) so it's just an
+ *  overlay on top of the auto-detected value, not a replacement for it. */
+async function markCipComplete(id) {
+  if (!S.db) return toast("No shared database in this view.");
+  await S.db.collection("cip_projects").doc(id).update({ status_override: "finished", updated_by: viewerLabel(), updated_at: new Date().toISOString() });
+  toast("Marked complete — awaiting transfer to PPE.");
+  openCipDetail(id);
+}
+async function markCipInProgress(id) {
+  if (!S.db) return toast("No shared database in this view.");
+  await S.db.collection("cip_projects").doc(id).update({ status_override: "in_progress", updated_by: viewerLabel(), updated_at: new Date().toISOString() });
+  toast("Marked back in progress.");
+  openCipDetail(id);
 }
 
 function openCipBillingModal(projectId, index) {
@@ -2312,6 +2361,7 @@ Object.assign(window, {
   printLedgerCardsBulkReports, printPropertyCardsBulkReports,
   openCipProjectModal, saveCipProject, openCipDetail,
   openCipBillingModal, saveCipBilling, deleteCipBilling,
+  markCipComplete, markCipInProgress,
   openCipCompleteModal, completeCipProject,
   printCipLedgerCard, printCipLedgerCardsBulk, exportCipCsv,
   openCipBulkImportModal, submitCipBulkImport,
