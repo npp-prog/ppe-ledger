@@ -102,6 +102,7 @@
     color:var(--ink-soft); font-size:13.5px; font-weight:500; cursor:pointer; display:flex;
     align-items:center; gap:9px; transition:background .12s ease, color .12s ease;
   }
+  nav button[hidden]{ display:none; }
   nav button .ico{ font-family:"Roboto Mono",monospace; font-size:11px; width:18px; text-align:center; color:var(--ink-faint); }
   nav button:hover{ background:var(--line-soft); color:var(--ink); }
   nav button.active{ background:var(--accent-soft); color:var(--accent-strong); font-weight:600; }
@@ -276,5 +277,5 @@
 .signin-links a{ cursor:pointer; }
 #signin-screen .btn.block{ width:100%; justify-content:center; }
 #app[hidden], #signin-screen[hidden]{ display:none !important; }
-.auth-chip{ display:flex; align-items:center; justify-content:space-between; gap:6px; }
-.auth-chip .email{ font-size:11.5px; color:var(--ink); word-break:break-all; }
+.auth-chip{ display:flex; align-items:center; justify-content:flex-start; gap:6px; flex-wrap:wrap; }
+.auth-chip .email{ font-size:11.5px; color:var(--ink); word-break:break-all; flex:1 1 100%; }
