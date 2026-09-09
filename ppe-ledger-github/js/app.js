@@ -100,6 +100,10 @@ function isSxAccount(code) { return Object.prototype.hasOwnProperty.call(SX_ACCO
 /** "ppe" or "sx" — defaults to "ppe" for any asset saved before this field existed (the 245
  *  production assets included), so no data migration is needed. */
 function itemTypeOf(asset) { return asset && asset.item_type === "sx" ? "sx" : "ppe"; }
+/** Sentinel value for the Accountable Officer filter's "no officer assigned" option — distinct
+ *  from "" (which means "all officers, no filter") and from any real officer name, so items with
+ *  a blank accountable_officer can be filtered to specifically rather than being unreachable. */
+const NO_OFFICER = "__no_officer__";
 
 const BASELINE_PERIOD = "2025-12"; // last closed year-end this registry is anchored to (per uploaded TB)
 
@@ -314,11 +318,15 @@ function cipStatusLabel(status) {
 /* ---------- Reconciliation engine ---------- */
 /** distinct {code,name} cost accounts actually used in one fund's active register, sorted by
  *  code — includes CIP account codes with an in-progress project even though those projects no
- *  longer live in the Asset Register itself, so Reconciliation keeps covering them. */
+ *  longer live in the Asset Register itself, so Reconciliation keeps covering them. Items with no
+ *  account code at all (e.g. undocumented "found at the station" items awaiting classification)
+ *  are deliberately excluded here — there's no code to reconcile against, and including them used
+ *  to add a bogus "null" row to the Reconciliation table. Their cost still counts in Dashboard/
+ *  Register/Reports totals; they're just outside what Reconciliation can check. */
 function distinctCostAccounts(fund) {
   const map = new Map();
-  activeAssets(fund).forEach(a => { if (!map.has(a.account_code)) map.set(a.account_code, a.account_name); });
-  activeCipProjects(fund).forEach(p => { if (!map.has(p.account_code)) map.set(p.account_code, p.account_name); });
+  activeAssets(fund).forEach(a => { if (a.account_code && !map.has(a.account_code)) map.set(a.account_code, a.account_name); });
+  activeCipProjects(fund).forEach(p => { if (p.account_code && !map.has(p.account_code)) map.set(p.account_code, p.account_name); });
   return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([code, name]) => ({ code, name }));
 }
 function registryCostFor(code, fund) {
@@ -462,16 +470,25 @@ function renderDashboard() {
   const cipInProgress = activeCipProjects(fund);
   const cipTotal = round2(cipInProgress.reduce((s, p) => s + cipProjectTotal(p), 0));
 
-  // category breakdown, split by item type so PPE and Semi-Expendable categories never collide
+  // category breakdown, split by item type so PPE and Semi-Expendable categories never collide.
+  // Sorted by account code (ascending) rather than by cost, so the table reads in the same order
+  // as the chart of accounts — accounts with no code at all (e.g. undocumented "found at the
+  // station" items) sort last under their own labeled bucket instead of mixing in.
   const byCat = new Map();
   active.forEach(a => {
     const type = itemTypeOf(a);
-    const k = type + "|" + (a.account_name || "— No account assigned —");
-    if (!byCat.has(k)) byCat.set(k, { name: a.account_name || "— No account assigned —", type, cost: 0, ad: 0, count: 0, depreciable: a.depreciable });
+    const code = a.account_code || null;
+    const k = type + "|" + (code || "none") + "|" + (a.account_name || "— No account assigned —");
+    if (!byCat.has(k)) byCat.set(k, { name: a.account_name || "— No account assigned —", type, code, cost: 0, ad: 0, count: 0, depreciable: a.depreciable });
     const c = byCat.get(k);
     c.cost += a.cost || 0; c.ad += currentAccumDepr(a); c.count++;
   });
-  const cats = [...byCat.values()].sort((a, b) => b.cost - a.cost);
+  const cats = [...byCat.values()].sort((a, b) => {
+    if (a.code == null && b.code == null) return b.cost - a.cost;
+    if (a.code == null) return 1;
+    if (b.code == null) return -1;
+    return a.code - b.code;
+  });
 
   // reconciliation attention items — latest tb snapshot period for this fund, if any (covers both
   // PPE and Semi-Expendable cost accounts, since distinctCostAccounts/computeReconciliation now
@@ -484,7 +501,8 @@ function renderDashboard() {
 
   el.innerHTML = `
     <div class="cardrow">
-      <div class="card"><div class="label">Total Cost</div><div class="value">${fmtMoney(totalCost)}</div><div class="foot">${active.length} active items — ${fmtMoney(ppeCost)} PPE, ${fmtMoney(sxCost)} Semi-Expendable</div></div>
+      <div class="card"><div class="label">PPE Total Cost</div><div class="value">${fmtMoney(ppeCost)}</div><div class="foot">${ppeActive.length} active PPE item(s)</div></div>
+      <div class="card"><div class="label">Semi-Expendable Total Cost</div><div class="value">${fmtMoney(sxCost)}</div><div class="foot">${sxActive.length} active item(s)</div></div>
       <div class="card"><div class="label">Accumulated Depreciation</div><div class="value">${fmtMoney(totalAD)}</div><div class="foot">as of ${last ? periodShort(last) : periodShort(BASELINE_PERIOD)} — PPE only</div></div>
       <div class="card"><div class="label">Carrying Amount</div><div class="value">${fmtMoney(totalCarrying)}</div><div class="foot">net book value, all classes</div></div>
       <div class="card"><div class="label">Semi-Expendable Classification</div><div class="value">${highCount} / ${lowCount}</div><div class="foot">High Value / Low Value — ${sxActive.length} item(s)</div></div>
@@ -523,12 +541,12 @@ function renderDashboard() {
     `<div class="banner warn">No Trial Balance has been entered for reconciliation yet. Open <a href="#" onclick="setView('reconciliation');return false;">Reconciliation</a> to paste one in.</div>`}
 
     <div class="panel">
-      <div class="panel-head"><div><h3>By category</h3><div class="desc">Active items, current period — PPE and Semi-Expendable</div></div></div>
+      <div class="panel-head"><div><h3>By category</h3><div class="desc">Active items, current period — PPE and Semi-Expendable, in account number order</div></div></div>
       <div class="panel-body flush"><div class="tablewrap"><table>
-        <thead><tr><th>Type</th><th>Category</th><th class="num">Items</th><th class="num">Cost</th><th class="num">Accum. Depreciation</th><th class="num">Carrying Amount</th><th>% Depreciated</th></tr></thead>
+        <thead><tr><th>Type</th><th>Account</th><th>Category</th><th class="num">Items</th><th class="num">Cost</th><th class="num">Accum. Depreciation</th><th class="num">Carrying Amount</th><th>% Depreciated</th></tr></thead>
         <tbody>${cats.map(c => {
           const pct = c.depreciable && c.cost ? Math.min(100, Math.round((c.ad / c.cost) * 100)) : null;
-          return `<tr><td>${c.type === "sx" ? '<span class="pill neutral">SX</span>' : '<span class="pill good">PPE</span>'}</td><td>${esc(c.name)}</td><td class="num mono">${c.count}</td><td class="num mono">${fmtMoney(c.cost)}</td>
+          return `<tr><td>${c.type === "sx" ? '<span class="pill neutral">SX</span>' : '<span class="pill good">PPE</span>'}</td><td class="mono">${c.code != null ? c.code : '<span class="subtle">—</span>'}</td><td>${esc(c.name)}</td><td class="num mono">${c.count}</td><td class="num mono">${fmtMoney(c.cost)}</td>
             <td class="num mono">${c.depreciable ? fmtMoney(c.ad) : '<span class="subtle">n/a</span>'}</td>
             <td class="num mono">${fmtMoney(c.cost - c.ad)}</td>
             <td>${pct == null ? '<span class="subtle">—</span>' : `<div class="progress" style="width:90px;display:inline-block;vertical-align:middle;margin-right:6px;"><div style="width:${pct}%"></div></div><span class="mono subtle">${pct}%</span>`}</td></tr>`;
@@ -635,7 +653,8 @@ function filterAssetRows(f) {
   let rows = assetsInCurrentFund();
   if (f.status !== "all") rows = rows.filter(a => a.status === f.status);
   if (f.category) rows = rows.filter(a => a.account_name === f.category);
-  if (f.officer) rows = rows.filter(a => (a.accountable_officer || "") === f.officer);
+  if (f.officer === NO_OFFICER) rows = rows.filter(a => !a.accountable_officer);
+  else if (f.officer) rows = rows.filter(a => (a.accountable_officer || "") === f.officer);
   if (f.itemType) rows = rows.filter(a => itemTypeOf(a) === f.itemType);
   if (f.classification) rows = rows.filter(a => itemTypeOf(a) === "sx" && sxClassificationOf(a) === f.classification);
   if (f.q) {
@@ -2497,6 +2516,7 @@ function renderReports() {
   const f = S.reportsFilter;
   const categories = [...new Set(assetsInCurrentFund().map(a => a.account_name))].sort();
   const officers = [...new Set(assetsInCurrentFund().map(a => a.accountable_officer).filter(Boolean))].sort();
+  const hasUnassigned = assetsInCurrentFund().some(a => !a.accountable_officer);
   const rows = filterAssetRows(f);
   const totalCost = round2(rows.reduce((s, a) => s + (a.cost || 0), 0));
   const totalCarrying = round2(rows.reduce((s, a) => s + carryingAmount(a), 0));
@@ -2509,7 +2529,7 @@ function renderReports() {
         <input type="text" class="grow" id="repSearch" placeholder="Search description, property/SEN, location, officer…" value="${esc(f.q)}">
         <select id="repCategory"><option value="">All categories</option>${categories.map(c => `<option ${c === f.category ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
         <select id="repType"><option value="">PPE &amp; Semi-Expendable</option><option value="ppe" ${f.itemType === "ppe" ? "selected" : ""}>PPE only</option><option value="sx" ${f.itemType === "sx" ? "selected" : ""}>Semi-Expendable only</option></select>
-        <select id="repOfficer"><option value="">All accountable officers</option>${officers.map(o => `<option ${o === f.officer ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>
+        <select id="repOfficer"><option value="">All accountable officers</option>${officers.map(o => `<option ${o === f.officer ? "selected" : ""}>${esc(o)}</option>`).join("")}${hasUnassigned ? `<option value="${NO_OFFICER}" ${f.officer === NO_OFFICER ? "selected" : ""}>— No accountable officer assigned —</option>` : ""}</select>
         <select id="repStatus">
           <option value="active" ${f.status === "active" ? "selected" : ""}>Active</option>
           <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
@@ -2519,7 +2539,7 @@ function renderReports() {
         <button class="btn" onclick="printLedgerCardsBulkReports()">Print Ledger Cards (${rows.length})</button>
         <button class="btn" onclick="printPropertyCardsBulkReports()">Print Property Cards (${rows.length})</button>
       </div>
-      <div class="subtle" style="padding:2px 14px 10px;font-size:12.5px;">${rows.length} item(s)${f.officer ? ` accountable to <b>${esc(f.officer)}</b>` : ""} — total cost ${fmtMoney(totalCost)}, carrying amount ${fmtMoney(totalCarrying)}</div>
+      <div class="subtle" style="padding:2px 14px 10px;font-size:12.5px;">${rows.length} item(s)${f.officer === NO_OFFICER ? ` with no accountable officer assigned` : f.officer ? ` accountable to <b>${esc(f.officer)}</b>` : ""} — total cost ${fmtMoney(totalCost)}, carrying amount ${fmtMoney(totalCarrying)}</div>
       <div class="panel-body flush"><div class="tablewrap"><table>
         <thead><tr><th>Type</th><th>Property/SEN</th><th>Category</th><th>Description</th><th>Status</th><th style="width:210px;">Reports</th></tr></thead>
         <tbody>${rows.length ? rows.map(a => `
@@ -2530,8 +2550,10 @@ function renderReports() {
             <td class="truncate" title="${esc(a.description)}">${esc(a.description) || "—"}</td>
             <td>${a.status === "retired" ? '<span class="pill neutral">Retired</span>' : '<span class="pill good">Active</span>'}</td>
             <td>
-              <button class="btn" style="margin-right:6px;" onclick="printLedgerCard('${a.id}')">Ledger Card</button>
-              <button class="btn" onclick="printPropertyCard('${a.id}')">Property Card</button>
+              <div style="display:flex;flex-direction:column;gap:6px;width:132px;">
+                <button class="btn" style="width:100%;justify-content:center;" onclick="printLedgerCard('${a.id}')">Ledger Card</button>
+                <button class="btn" style="width:100%;justify-content:center;" onclick="printPropertyCard('${a.id}')">Property Card</button>
+              </div>
             </td>
           </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No items match these filters.</div></td></tr>`}
         </tbody>
@@ -2555,7 +2577,7 @@ function exportReportsCsv() {
       a.depreciable ? currentAccumDepr(a).toFixed(2) : "n/a", carryingAmount(a).toFixed(2), sx ? sxClassificationLabel(sxClassificationOf(a)) : "", a.status || ""]);
   });
   const csv = out.map(r => r.map(csvField).join(",")).join("\n");
-  const officerPart = S.reportsFilter.officer ? `_${S.reportsFilter.officer.replace(/[^a-zA-Z0-9]+/g, "_")}` : "";
+  const officerPart = S.reportsFilter.officer === NO_OFFICER ? "_No_Officer" : S.reportsFilter.officer ? `_${S.reportsFilter.officer.replace(/[^a-zA-Z0-9]+/g, "_")}` : "";
   browserDownload(`Accountability_Report_${S.currentFund}${officerPart}_${new Date().toISOString().slice(0, 10)}.csv`, csv, "text/csv;charset=utf-8;");
   toast("Saved.");
 }
