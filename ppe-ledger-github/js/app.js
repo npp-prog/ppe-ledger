@@ -3,7 +3,7 @@
    Municipal Government Office, Candoni — General Fund PPE
    (Standalone / Firebase edition — ported from the Claude Artifact version)
    ============================================================ */
-import { db, browserDownload, uploadFile, deleteFile } from "./firebase.js";
+import { db, browserDownload, uploadFile, deleteFile, changePassword } from "./firebase.js";
 
 /* ---------- Chart-of-accounts catalog (fixed reference data — not user data) ---------- */
 const ACCOUNT_CATALOG = [
@@ -107,6 +107,21 @@ const NO_OFFICER = "__no_officer__";
 
 const BASELINE_PERIOD = "2025-12"; // last closed year-end this registry is anchored to (per uploaded TB)
 
+/* ---------- Access Role / permissions ----------
+ * App-level only, by explicit choice — Firestore rules stay a single "any signed-in user" wildcard
+ * (see firestore.rules), so this is convenience/least-privilege for ordinary staff, not a security
+ * boundary against someone who opens dev tools. That caveat is shown to the Admin in the Users &
+ * Roles tab and should stay true of anything added here. */
+/** Email(s) that are ALWAYS full Admins, no matter what (or whether anything) is in Firestore —
+ *  a hardcoded safety net so a bad edit in the Users & Roles tab can never lock every admin out of
+ *  fixing it. Compared case-insensitively. */
+const HARDCODED_ADMIN_EMAILS = ["npp@mgocandoniaccounting.org"];
+/** Tabs where "View" and "Edit" mean different things (there's something to Add/Edit/Delete/Post/
+ *  Record/etc.). The remaining tabs are read-only by nature, so their access is a plain on/off. */
+const EDITABLE_TABS = ["register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa"];
+const VIEW_ONLY_TABS = ["dashboard", "reports", "retired"];
+const ALL_PERMISSION_TABS = [...EDITABLE_TABS, ...VIEW_ONLY_TABS];
+
 // Municipal seal, embedded as a data: URI so the printed Equipment Ledger Card / Property Card
 // work with no external image request. Paste a "data:image/png;base64,...." string here (export
 // your seal as a PNG and base64-encode it) to have it appear in the card header; leave blank to
@@ -186,6 +201,9 @@ const S = {
                            // hand (not auto-generated) with its own Transaction Date/CIP No./SWA No./
                            // Contractor/Cost plus the actual document file, then optionally matched to
                            // a specific Construction in Progress billing — see the SWA section.
+  userRoles: new Map(),   // lowercased email -> role doc (own collection "user_roles") — see the
+                           // Access Role section below. Absence of a doc for an email means "full
+                           // access, opt-in restriction model" — see tabAccess().
   linkParIcsId: null,     // set by recordParIcsAsNew() right before opening the Add Item modal — tells
                            // saveAsset() which pending PAR/ICS record to mark "recorded" once the
                            // new asset is created. Reset to null at the top of every openAssetModal()
@@ -208,6 +226,48 @@ const S = {
 /** Label used for "last edited by" / "posted by" style attribution — the signed-in user's email. */
 function viewerLabel() {
   return (S.currentUser && (S.currentUser.email || S.currentUser.displayName)) || "Unnamed";
+}
+function currentEmailLower() {
+  return ((S.currentUser && S.currentUser.email) || "").toLowerCase();
+}
+function isHardcodedAdmin(email) {
+  return HARDCODED_ADMIN_EMAILS.some(e => e.toLowerCase() === (email || "").toLowerCase());
+}
+/** True if the CURRENT signed-in user is an Admin — either hardcoded (always) or flagged
+ *  `is_admin: true` on their own user_roles doc. Admins get full Edit access to every ordinary
+ *  tab automatically (no need to also give themselves per-tab entries) and are the only ones who
+ *  can see/use the Users & Roles tab. */
+function isAdmin() {
+  const email = currentEmailLower();
+  if (isHardcodedAdmin(email)) return true;
+  const role = S.userRoles.get(email);
+  return !!(role && role.is_admin);
+}
+/** Returns "edit" | "view" | "none" for `tabKey`, for the CURRENT signed-in user.
+ *  - Admins always get "edit" on every ordinary tab (Users & Roles access is separate — isAdmin()).
+ *  - Everyone else defaults to full "edit" access UNLESS a user_roles doc exists for their email —
+ *    this is an opt-in restriction model, so shipping this feature never silently locks out staff
+ *    who haven't been given an explicit role yet.
+ *  - A role doc that simply omits a given tab key also defaults that tab to full access, so a tab
+ *    added in the future is never accidentally locked down for someone whose role doc pre-dates it. */
+function tabAccess(tabKey) {
+  if (isAdmin()) return "edit";
+  const role = S.userRoles.get(currentEmailLower());
+  if (!role) return "edit";
+  const level = role.tabs && role.tabs[tabKey];
+  if (level === "none" || level === "view" || level === "edit") return level;
+  return VIEW_ONLY_TABS.includes(tabKey) ? "view" : "edit";
+}
+function hasTabAccess(tabKey) { return tabAccess(tabKey) !== "none"; }
+function canEdit(tabKey) { return tabAccess(tabKey) === "edit"; }
+/** One-line guard for the top of every mutating function, keyed by which tab it belongs to.
+ *  Defense in depth — the button that calls it should already be hidden/disabled by canEdit() in
+ *  the matching render function, so this only matters if someone calls it another way (console,
+ *  a stale button reference, etc). Returns true (and toasts) when the action should be BLOCKED. */
+function blockIfViewOnly(tabKey) {
+  if (canEdit(tabKey)) return false;
+  toast("View-only access — ask your Admin for Edit access to make changes here.");
+  return true;
 }
 
 /* ---------- Depreciation engine ---------- */
@@ -463,6 +523,10 @@ function initDb() {
       snap => { S.swaRecords.clear(); snap.docs.forEach(d => S.swaRecords.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
       err => console.error(err)
     );
+    db.collection("user_roles").onSnapshot(
+      snap => { S.userRoles.clear(); snap.docs.forEach(d => S.userRoles.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
+      err => console.error(err)
+    );
     // Semi-Expendable Property items live in this same "assets" collection (tagged item_type:
     // "sx") and Trial Balance snapshots in this same "tb_snapshots" collection — see the
     // item_type unification above — so no separate sx_assets/sx_tb_snapshots listeners are needed.
@@ -481,6 +545,7 @@ function setSync(live, msg) {
    ============================================================ */
 function renderDashboard() {
   const el = document.getElementById("view-dashboard");
+  if (!hasTabAccess("dashboard")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const fund = S.currentFund;
   const active = activeAssets(fund);
@@ -604,6 +669,13 @@ function renderDashboard() {
 function loadingBlock() {
   return `<div class="empty"><div class="big">⋯</div>Loading the shared PPE register&hellip;</div>`;
 }
+/** Shown instead of a tab's real content when the current user's access to that tab is "None" —
+ *  belt-and-suspenders alongside the nav hiding in applyAccessControlToNav(), for the moment right
+ *  after access is revoked (or the brief window before that redirect runs) rather than ever
+ *  rendering real data to someone who shouldn't see it. */
+function restrictedBlock() {
+  return `<div class="empty"><div class="big">🔒</div>You don't have access to this tab. Ask your Admin for access if you need it.</div>`;
+}
 
 /* ============================================================
    RENDER: Asset Register
@@ -633,6 +705,7 @@ function restoreFocus(saved) {
 }
 function renderRegister() {
   const el = document.getElementById("view-register");
+  if (!hasTabAccess("register")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const focus = captureFocus("view-register");
   const f = S.registerFilter;
@@ -654,9 +727,10 @@ function renderRegister() {
         <button class="btn" onclick="exportRegisterCsv()">Download CSV</button>
         <button class="btn" onclick="printLedgerCardsBulk()">Print Ledger Cards</button>
         <button class="btn" onclick="printPropertyCardsBulk()">Print Property Cards</button>
+        ${canEdit("register") ? `
         <button class="btn" onclick="openBulkAddModal()">Bulk add PPE (paste)</button>
         <button class="btn" onclick="openSxBulkAddModal()">Bulk add Semi-Expendable (paste)</button>
-        <button class="btn primary" onclick="openAssetModal()">+ Add item</button>
+        <button class="btn primary" onclick="openAssetModal()">+ Add item</button>` : ""}
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
         <thead><tr><th>Type</th><th>Property/SEN</th><th>Category</th><th>Description</th><th>Location</th><th class="num">Cost</th><th class="num">Accum. Depr.</th><th class="num">Carrying</th><th>Classification</th><th>Status</th></tr></thead>
@@ -904,6 +978,7 @@ function openAssetModal(existingId, initialType, prefill) {
 
 async function saveAsset(existingId) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("register")) return;
   const existing = existingId ? S.assets.get(existingId) : null;
   // Captured up front, before any awaits — recordParIcsAsNew()/openAssetModal() set this right before
   // this modal opened, and only a brand-new item (never an edit) links back to a PAR/ICS record.
@@ -1052,6 +1127,7 @@ function openRetireModal(id) {
 }
 async function submitRetire(id) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("register")) return;
   const reason = document.getElementById("sr_reason").value;
   const detail = document.getElementById("sr_detail").value.trim();
   if (!reason) return toast("Select a reason.");
@@ -1142,14 +1218,14 @@ function openAssetDetail(id) {
           <label class="subtle" style="font-size:11px;">Photo</label>
           ${a.photo_url
             ? `<div><img src="${esc(a.photo_url)}" alt="Asset photo" style="max-width:160px;max-height:120px;border:1px solid var(--line);border-radius:6px;display:block;"></div>
-               <button class="btn small ghost" style="margin-top:6px;" onclick="removeAssetPhoto('${a.id}')">Remove photo</button>`
+               ${canEdit("register") ? `<button class="btn small ghost" style="margin-top:6px;" onclick="removeAssetPhoto('${a.id}')">Remove photo</button>` : ""}`
             : `<div class="subtle" style="font-size:12px;">No photo attached — add one from Edit.</div>`}
         </div>
         <div class="field">
           <label class="subtle" style="font-size:11px;">Document (e.g. PAR)</label>
           ${a.document_url
             ? `<div><a href="${esc(a.document_url)}" target="_blank" rel="noopener">${esc(a.document_name || "View document")}</a></div>
-               <button class="btn small ghost" style="margin-top:6px;" onclick="removeAssetDocument('${a.id}')">Remove document</button>`
+               ${canEdit("register") ? `<button class="btn small ghost" style="margin-top:6px;" onclick="removeAssetDocument('${a.id}')">Remove document</button>` : ""}`
             : `<div class="subtle" style="font-size:12px;">No document attached — add one from Edit.</div>`}
         </div>
         <div class="field">
@@ -1160,14 +1236,14 @@ function openAssetDetail(id) {
       </div>
     </div>
     <div class="modal-foot">
-      ${a.status === "active" ? `<button class="btn danger" style="margin-right:auto" onclick="openRetireModal('${a.id}')">Retire</button>` : ""}
+      ${a.status === "active" && canEdit("register") ? `<button class="btn danger" style="margin-right:auto" onclick="openRetireModal('${a.id}')">Retire</button>` : ""}
       <button class="btn ghost" onclick="closeModal()">Close</button>
       <button class="btn" onclick="printLedgerCard('${a.id}')">Ledger Card</button>
       <button class="btn" onclick="printPropertyCard('${a.id}')">Property Card</button>
-      ${a.status === "active" ? `<button class="btn" onclick="openTransferModal('${a.id}')">Transfer</button>` : ""}
-      ${a.status === "active" && !isSx ? `<button class="btn" onclick="openRevalueModal('${a.id}')">Revalue</button>` : ""}
-      ${a.status === "active" && isSx ? `<button class="btn" onclick="openSxLedgerEntryModal('${a.id}')">Add ledger entry</button>` : ""}
-      <button class="btn primary" onclick="openAssetModal('${a.id}')">Edit</button>
+      ${a.status === "active" && canEdit("register") ? `<button class="btn" onclick="openTransferModal('${a.id}')">Transfer</button>` : ""}
+      ${a.status === "active" && !isSx && canEdit("register") ? `<button class="btn" onclick="openRevalueModal('${a.id}')">Revalue</button>` : ""}
+      ${a.status === "active" && isSx && canEdit("register") ? `<button class="btn" onclick="openSxLedgerEntryModal('${a.id}')">Add ledger entry</button>` : ""}
+      ${canEdit("register") ? `<button class="btn primary" onclick="openAssetModal('${a.id}')">Edit</button>` : ""}
     </div>
   `, "wide");
   renderAssetQr(a);
@@ -1190,6 +1266,7 @@ function renderAssetQr(a) {
   } catch (e) { console.error(e); }
 }
 async function removeAssetPhoto(id) {
+  if (blockIfViewOnly("register")) return;
   const a = S.assets.get(id);
   if (!a || !a.photo_url) return;
   if (!confirm("Remove this photo?")) return;
@@ -1199,6 +1276,7 @@ async function removeAssetPhoto(id) {
   openAssetDetail(id);
 }
 async function removeAssetDocument(id) {
+  if (blockIfViewOnly("register")) return;
   const a = S.assets.get(id);
   if (!a || !a.document_url) return;
   if (!confirm("Remove this document?")) return;
@@ -1272,6 +1350,7 @@ function openRevalueModal(id) {
 
 async function revalueAsset(id) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("register")) return;
   const a = S.assets.get(id);
   if (!a) return;
   const newCost = round2(Number(document.getElementById("rv_cost").value) || 0);
@@ -1376,6 +1455,7 @@ function openTransferModal(id) {
 
 async function transferAsset(id) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("register")) return;
   const a = S.assets.get(id);
   if (!a) return;
   const isSx = itemTypeOf(a) === "sx";
@@ -1494,6 +1574,7 @@ function parseBulkRows(text) {
 }
 async function submitBulkAdd() {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("register")) return;
   const rows = parseBulkRows(document.getElementById("bulkPaste").value);
   if (!rows.length) return toast("No valid rows found.");
   let added = 0;
@@ -1530,6 +1611,7 @@ function periodOptionsForDepreciation(fund) {
 }
 function renderDepreciation() {
   const el = document.getElementById("view-depreciation");
+  if (!hasTabAccess("depreciation")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const fund = S.currentFund;
   const opts = periodOptionsForDepreciation(fund);
@@ -1558,8 +1640,8 @@ function renderDepreciation() {
         <span style="flex:1"></span>
         ${isPosted
           ? `<span class="pill good">Posted ${jev.postedAt ? "• " + new Date(jev.postedAt).toLocaleDateString() : ""}${jev.postedBy ? " by " + esc(jev.postedBy) : ""}</span>
-             ${period === lastPostedPeriod(fund) ? `<button class="btn danger" onclick="undoPosting('${period}')">Undo posting</button>` : ""}`
-          : `<button class="btn primary" onclick="postPeriod('${period}')" ${assetRows.length && recon.ok ? "" : "disabled"} title="${recon.ok ? "" : "Upload/confirm a Trial Balance that ties out on PPE cost accounts first — see the Reconciliation tab"}">Post ${periodLabel(period)} depreciation</button>`}
+             ${period === lastPostedPeriod(fund) && canEdit("depreciation") ? `<button class="btn danger" onclick="undoPosting('${period}')">Undo posting</button>` : ""}`
+          : canEdit("depreciation") ? `<button class="btn primary" onclick="postPeriod('${period}')" ${assetRows.length && recon.ok ? "" : "disabled"} title="${recon.ok ? "" : "Upload/confirm a Trial Balance that ties out on PPE cost accounts first — see the Reconciliation tab"}">Post ${periodLabel(period)} depreciation</button>` : ""}
       </div>
       <div class="panel-body">
         ${!isPosted && !recon.ok ? `
@@ -1621,6 +1703,7 @@ function renderDepreciation() {
 
 async function postPeriod(period) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("depreciation")) return;
   const fund = S.currentFund;
   if (getPosting(fund, period)) return toast("Already posted.");
   const recon = costReconciliationStatus(fund, period);
@@ -1642,6 +1725,7 @@ async function postPeriod(period) {
 }
 async function undoPosting(period) {
   if (!S.db) return;
+  if (blockIfViewOnly("depreciation")) return;
   const fund = S.currentFund;
   if (!confirm(`Undo the ${periodLabel(period)} posting for ${fundLabel(fund)}? This cannot be redone automatically.`)) return;
   await S.db.collection("postings").doc(fundDocId(fund, period)).delete();
@@ -1681,6 +1765,7 @@ function exportDepreciationDetailCsv(period) {
    ============================================================ */
 function renderReconciliation() {
   const el = document.getElementById("view-reconciliation");
+  if (!hasTabAccess("reconciliation")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const fund = S.currentFund;
   if (!S.reconPeriod) {
@@ -1705,14 +1790,15 @@ function renderReconciliation() {
       </div>
       <div class="panel-body">
         <p class="subtle" style="margin-top:0;">Paste your Trial Balance export for this period below — the same columns your accounting system exports: <span class="mono">Account Code, Account Name, Debit, Credit</span> (tab or comma separated). Cost and accumulated-depreciation accounts for every active PPE and Semi-Expendable item are used (Semi-Expendable accounts never carry an accumulated-depreciation side); everything else is ignored.</p>
+        ${canEdit("reconciliation") ? `
         <div class="fieldrow" style="align-items:flex-end;margin-bottom:10px;">
           <div class="field" style="flex:1;">
             <label>Or upload the Trial Balance from an Excel file (.xlsx / .xls / .csv)</label>
             <input type="file" id="tbFile" accept=".xlsx,.xls,.csv">
           </div>
-        </div>
-        <textarea id="tbPaste" rows="6" placeholder="10705020&#9;Office Equipment&#9;2063166.50&#9;0&#10;10705021&#9;Accumulated Depreciation - Office Equipment&#9;0&#9;756648.50">${tb ? Object.entries(tb.accounts).map(([code, v]) => `${code}\t${v.name}\t${v.debit}\t${v.credit}`).join("\n") : (S.reconDraft || "")}</textarea>
-        <div style="margin-top:10px;"><button class="btn primary" onclick="saveTbSnapshot()">Save &amp; compare</button></div>
+        </div>` : ""}
+        <textarea id="tbPaste" rows="6" ${canEdit("reconciliation") ? "" : "readonly"} placeholder="10705020&#9;Office Equipment&#9;2063166.50&#9;0&#10;10705021&#9;Accumulated Depreciation - Office Equipment&#9;0&#9;756648.50">${tb ? Object.entries(tb.accounts).map(([code, v]) => `${code}\t${v.name}\t${v.debit}\t${v.credit}`).join("\n") : (S.reconDraft || "")}</textarea>
+        ${canEdit("reconciliation") ? `<div style="margin-top:10px;"><button class="btn primary" onclick="saveTbSnapshot()">Save &amp; compare</button></div>` : ""}
       </div>
     </div>
 
@@ -1741,7 +1827,8 @@ function renderReconciliation() {
   document.getElementById("reconPeriodInput").addEventListener("change", e => { if (e.target.value) { S.reconPeriod = e.target.value; renderReconciliation(); } });
   const q = document.getElementById("reconQuick");
   if (q) q.addEventListener("change", e => { if (e.target.value) { S.reconPeriod = e.target.value; renderReconciliation(); } });
-  document.getElementById("tbFile").addEventListener("change", e => handleTbFileUpload(e.target));
+  const tbFileEl = document.getElementById("tbFile");
+  if (tbFileEl) tbFileEl.addEventListener("change", e => handleTbFileUpload(e.target));
   document.getElementById("tbPaste").addEventListener("input", e => { S.reconDraft = e.target.value; });
 }
 
@@ -1761,6 +1848,7 @@ function parseTbLines(text) {
 }
 async function saveTbSnapshot() {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("reconciliation")) return;
   const fund = S.currentFund;
   const period = document.getElementById("reconPeriodInput").value || S.reconPeriod;
   const text = document.getElementById("tbPaste").value;
@@ -1821,6 +1909,7 @@ function exportReconCsv(period) {
    ============================================================ */
 function renderRetired() {
   const el = document.getElementById("view-retired");
+  if (!hasTabAccess("retired")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const rows = assetsInCurrentFund().filter(a => a.status === "retired")
     .sort((a, b) => (a.account_name || "").localeCompare(b.account_name));
@@ -1893,6 +1982,7 @@ function cipProjectsFiltered(f) {
 function renderCip() {
   const el = document.getElementById("view-cip");
   if (!el) return; // older index.html without the CIP nav tab/container — nothing to render into
+  if (!hasTabAccess("cip")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const focus = captureFocus("view-cip");
   const f = S.cipFilter;
@@ -1911,8 +2001,9 @@ function renderCip() {
         <span style="flex:1"></span>
         <button class="btn" onclick="exportCipCsv()">Download CSV</button>
         <button class="btn" onclick="printCipLedgerCardsBulk()">Print Ledger Cards</button>
+        ${canEdit("cip") ? `
         <button class="btn" onclick="openCipBulkImportModal()">Bulk import (paste)</button>
-        <button class="btn primary" onclick="openCipProjectModal()">+ New project</button>
+        <button class="btn primary" onclick="openCipProjectModal()">+ New project</button>` : ""}
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
         <thead><tr><th>CIP No.</th><th>Account</th><th>Name of Project</th><th>Contractor</th><th class="num">Total to date</th><th>Status</th></tr></thead>
@@ -1972,6 +2063,7 @@ function openCipProjectModal(existingId) {
 }
 async function saveCipProject(existingId) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("cip")) return;
   const code = document.getElementById("c_code").value.trim();
   const name = document.getElementById("c_name").value.trim();
   if (!code) return toast("Enter a CIP No.");
@@ -2023,22 +2115,22 @@ function openCipDetail(id) {
         <dt>Total billed to date</dt><dd class="mono">${fmtMoney(total)}</dd>
         <dt>Status</dt><dd>${cipStatusPill(status)}</dd>
       </div>
-      ${isFinished ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">${p.status_override === "finished" ? "Marked complete" : "A billing here reads as the final one"} — construction looks done, but it hasn't been transferred into a PPE asset yet. Not right? <a href="#" onclick="markCipInProgress('${p.id}');return false;">Mark back in progress</a>.</p>` : ""}
+      ${isFinished && canEdit("cip") ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">${p.status_override === "finished" ? "Marked complete" : "A billing here reads as the final one"} — construction looks done, but it hasn't been transferred into a PPE asset yet. Not right? <a href="#" onclick="markCipInProgress('${p.id}');return false;">Mark back in progress</a>.</p>` : ""}
       ${isTransferred ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">Transferred to the Asset Register ${fmtDate(p.transferred_at ? p.transferred_at.slice(0, 10) : "")}${p.transferred_by ? " by " + esc(p.transferred_by) : ""}. <a href="#" onclick="closeModal();openAssetDetail('${p.transferred_asset_id}');return false;">View the asset →</a></p>` : ""}
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
         <label style="margin:0;">Billings</label>
-        ${!isTransferred ? `<button class="btn small" onclick="openCipBillingModal('${p.id}')">+ Add billing</button>` : ""}
+        ${!isTransferred && canEdit("cip") ? `<button class="btn small" onclick="openCipBillingModal('${p.id}')">+ Add billing</button>` : ""}
       </div>
       <div class="tablewrap"><table style="font-size:12px;">
-        <thead><tr><th>Date</th><th>Ref.</th><th>Particulars</th><th class="num">Total</th>${!isTransferred ? "<th></th>" : ""}</tr></thead>
+        <thead><tr><th>Date</th><th>Ref.</th><th>Particulars</th><th class="num">Total</th>${!isTransferred && canEdit("cip") ? "<th></th>" : ""}</tr></thead>
         <tbody>${billings.length ? billings.map((b, i) => `
           <tr>
             <td class="mono">${fmtDate(b.date)}</td>
             <td>${esc(b.ref)}${b.swa_id ? ` <span class="pill good" title="Matched to SWA ${esc((S.swaRecords.get(b.swa_id) || {}).swa_no || "")}">SWA</span>` : ""}</td>
             <td class="truncate" title="${esc(b.particulars)}">${esc(b.particulars) || "—"}</td>
             <td class="num mono">${fmtMoney(cipBillingTotal(b))}</td>
-            ${!isTransferred ? `<td><button class="btn small ghost" onclick="openCipBillingModal('${p.id}', ${i})">Edit</button></td>` : ""}
+            ${!isTransferred && canEdit("cip") ? `<td><button class="btn small ghost" onclick="openCipBillingModal('${p.id}', ${i})">Edit</button></td>` : ""}
           </tr>`).join("") : `<tr><td colspan="${isTransferred ? 4 : 5}"><div class="empty">No billings recorded yet.</div></td></tr>`}
         </tbody>
       </table></div>
@@ -2046,9 +2138,9 @@ function openCipDetail(id) {
     <div class="modal-foot">
       <button class="btn ghost" onclick="closeModal()">Close</button>
       <button class="btn" onclick="printCipLedgerCard('${p.id}')">Ledger Card</button>
-      ${!isTransferred ? `<button class="btn" onclick="openCipProjectModal('${p.id}')">Edit</button>` : ""}
-      ${status === "in_progress" ? `<button class="btn" onclick="markCipComplete('${p.id}')">Mark complete</button>` : ""}
-      ${!isTransferred ? `<button class="btn primary" onclick="openCipCompleteModal('${p.id}')">Complete → transfer to PPE</button>` : ""}
+      ${!isTransferred && canEdit("cip") ? `<button class="btn" onclick="openCipProjectModal('${p.id}')">Edit</button>` : ""}
+      ${status === "in_progress" && canEdit("cip") ? `<button class="btn" onclick="markCipComplete('${p.id}')">Mark complete</button>` : ""}
+      ${!isTransferred && canEdit("cip") ? `<button class="btn primary" onclick="openCipCompleteModal('${p.id}')">Complete → transfer to PPE</button>` : ""}
     </div>
   `);
 }
@@ -2059,12 +2151,14 @@ function openCipDetail(id) {
  *  overlay on top of the auto-detected value, not a replacement for it. */
 async function markCipComplete(id) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("cip")) return;
   await S.db.collection("cip_projects").doc(id).update({ status_override: "finished", updated_by: viewerLabel(), updated_at: new Date().toISOString() });
   toast("Marked complete — awaiting transfer to PPE.");
   openCipDetail(id);
 }
 async function markCipInProgress(id) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("cip")) return;
   await S.db.collection("cip_projects").doc(id).update({ status_override: "in_progress", updated_by: viewerLabel(), updated_at: new Date().toISOString() });
   toast("Marked back in progress.");
   openCipDetail(id);
@@ -2222,6 +2316,7 @@ function unmatchDraftSwa(projectId, index) {
 }
 async function saveCipBilling(projectId, index) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("cip")) return;
   const p = S.cipProjects.get(projectId);
   if (!p) return;
   const b = index != null ? (p.billings || [])[index] : null;
@@ -2266,6 +2361,7 @@ async function saveCipBilling(projectId, index) {
   } catch (e) { console.error(e); toast("Couldn't save — try again."); }
 }
 async function deleteCipBilling(projectId, index) {
+  if (blockIfViewOnly("cip")) return;
   const p = S.cipProjects.get(projectId);
   if (!p) return;
   if (!confirm("Delete this billing entry?")) return;
@@ -2323,6 +2419,7 @@ function openCipCompleteModal(id) {
 }
 async function completeCipProject(id) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("cip")) return;
   const p = S.cipProjects.get(id);
   if (!p) return;
   const total = cipProjectTotal(p);
@@ -2489,6 +2586,7 @@ function parseFlexibleDate(s) {
 }
 async function submitCipBulkImport() {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("cip")) return;
   const rows = parseCipBulkRows(document.getElementById("cipBulkPaste").value);
   if (!rows.length) return toast("No valid rows found.");
   // Stage into existing/new project buckets first, then write once per project — so 40+ billing
@@ -2583,6 +2681,7 @@ function exportSwaCsv() {
 function renderSwa() {
   const el = document.getElementById("view-swa");
   if (!el) return; // older index.html without the SWA nav tab/container — nothing to render into
+  if (!hasTabAccess("swa")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const focus = captureFocus("view-swa");
   const f = S.swaFilter;
@@ -2594,7 +2693,7 @@ function renderSwa() {
         <input type="text" class="grow" id="swaSearch" placeholder="Search SWA No., CIP No., contractor…" value="${esc(f.q)}">
         <span style="flex:1"></span>
         <button class="btn" onclick="exportSwaCsv()">Download CSV</button>
-        <button class="btn primary" onclick="openSwaModal()">+ Upload SWA</button>
+        ${canEdit("swa") ? `<button class="btn primary" onclick="openSwaModal()">+ Upload SWA</button>` : ""}
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
         <thead><tr><th>SWA No.</th><th>CIP No.</th><th>Transaction Date</th><th>Contractor</th><th class="num">Cost</th><th>Document</th><th>Status</th><th style="width:190px;">Actions</th></tr></thead>
@@ -2611,9 +2710,9 @@ function renderSwa() {
             <td>
               ${r.matched
                 ? `${proj ? `<a href="#" onclick="openCipDetail('${proj.id}');return false;" style="font-size:11px;margin-right:8px;">view project</a>` : ""}
-                   <button class="btn small ghost" onclick="unmatchSwa('${r.id}')">↩ Unmatch</button>`
-                : `<button class="btn small" style="margin-right:4px;" onclick="openSwaModal('${r.id}')">Edit</button>
-                   <button class="btn small danger" onclick="deleteSwa('${r.id}')">Delete</button>`}
+                   ${canEdit("swa") ? `<button class="btn small ghost" onclick="unmatchSwa('${r.id}')">↩ Unmatch</button>` : ""}`
+                : canEdit("swa") ? `<button class="btn small" style="margin-right:4px;" onclick="openSwaModal('${r.id}')">Edit</button>
+                   <button class="btn small danger" onclick="deleteSwa('${r.id}')">Delete</button>` : ""}
             </td>
           </tr>`;
         }).join("") : `<tr><td colspan="8"><div class="empty">No SWA records uploaded yet.</div></td></tr>`}
@@ -2656,6 +2755,7 @@ function openSwaModal(existingId) {
 }
 async function saveSwa(existingId) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("swa")) return;
   const existing = existingId ? S.swaRecords.get(existingId) : null;
   const fund = document.getElementById("s_fund").value;
   const number = document.getElementById("s_no").value.trim();
@@ -2696,6 +2796,7 @@ async function saveSwa(existingId) {
   } catch (e) { console.error(e); toast("Couldn't save — try again."); }
 }
 async function deleteSwa(id) {
+  if (blockIfViewOnly("swa")) return;
   const r = S.swaRecords.get(id);
   if (!r) return;
   if (r.matched) return toast("This SWA is matched to a billing — Unmatch it first to delete.");
@@ -2710,6 +2811,7 @@ async function deleteSwa(id) {
  *  clears the billing entry's own swa_id back-reference, but only if that billing still actually
  *  points at this SWA (a defensive guard against clobbering a newer match made since). */
 async function unmatchSwa(id) {
+  if (blockIfViewOnly("swa")) return;
   const r = S.swaRecords.get(id);
   if (!r || !r.matched) return;
   if (!confirm(`Unmatch SWA ${r.swa_no}? The linked billing's own cost figures stay as they are — only the link is undone.`)) return;
@@ -2723,6 +2825,182 @@ async function unmatchSwa(id) {
     await S.db.collection("cip_projects").doc(p.id).update({ billings, updated_by: viewerLabel(), updated_at: new Date().toISOString() });
   }
   toast("Unmatched.");
+}
+
+/* ============================================================
+   ACCESS ROLE — "Users & Roles" (Admin-only tab) + self-service password
+   change (any signed-in user). App-level only, by explicit choice — see the
+   comment above HARDCODED_ADMIN_EMAILS near the top of this file.
+   ============================================================ */
+/** Tab keys in the same order they appear in the sidebar — everything a role doc can grant/deny
+ *  access to. "users" itself is deliberately excluded — it isn't a permission a role doc can grant;
+ *  only isAdmin() (hardcoded email, or a role doc's own is_admin flag) opens it. */
+const PERMISSION_TAB_ORDER = ["dashboard", "reports", "register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "retired"];
+function permissionTabLabel(tabKey) { return (VIEW_TITLES[tabKey] || [tabKey])[0]; }
+/** Short, decision-relevant summary of one role doc's effective access for the Users & Roles list
+ *  — spelling out all ten tabs for every row would be noisy, so this calls out only what's NOT
+ *  full access (mirrors the same "absent key = full access" default used by tabAccess()). */
+function summarizeRoleAccess(role) {
+  if (role.is_admin) return "Full Admin";
+  const restricted = PERMISSION_TAB_ORDER
+    .map(t => ({ t, level: (role.tabs && role.tabs[t]) || (VIEW_ONLY_TABS.includes(t) ? "view" : "edit") }))
+    .filter(x => !(VIEW_ONLY_TABS.includes(x.t) ? x.level === "view" : x.level === "edit"));
+  if (!restricted.length) return "Full access (no restrictions set)";
+  return restricted.map(x => `${permissionTabLabel(x.t)}: ${x.level === "none" ? "Hidden" : "View only"}`).join(", ");
+}
+function renderUsers() {
+  const el = document.getElementById("view-users");
+  if (!el) return;
+  if (!isAdmin()) { el.innerHTML = `<div class="empty">Restricted to Admins.</div>`; return; }
+  const rows = [...S.userRoles.values()]
+    .filter(r => !isHardcodedAdmin(r.email || r.id))
+    .sort((a, b) => (a.email || a.id).localeCompare(b.email || b.id));
+  el.innerHTML = `
+    <div class="banner warn">Access here is <b>app-level only</b> — it hides menus and buttons in this app, but the shared database underneath is not locked per role. It keeps everyday staff to the menus they need; it is not a defense against someone deliberately bypassing the app itself (e.g. browser dev tools).</div>
+    <div class="toolbar">
+      <button class="btn primary" onclick="openUserRoleModal()">+ Add user</button>
+    </div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>Email</th><th>Role</th><th>Access</th><th></th></tr></thead>
+      <tbody>
+        <tr>
+          <td class="mono">${esc(HARDCODED_ADMIN_EMAILS[0])}</td>
+          <td><span class="pill good">Permanent Admin</span></td>
+          <td class="subtle">Full access — built into the app itself, can't be edited or removed here.</td>
+          <td></td>
+        </tr>
+        ${rows.map(r => `
+          <tr>
+            <td class="mono">${esc(r.email || r.id)}</td>
+            <td>${r.is_admin ? '<span class="pill good">Admin</span>' : '<span class="pill neutral">Staff</span>'}</td>
+            <td class="subtle">${esc(summarizeRoleAccess(r))}</td>
+            <td>
+              <button class="btn small ghost" style="margin-right:4px;" onclick="openUserRoleModal('${esc(r.id)}')">Edit</button>
+              <button class="btn small danger" onclick="deleteUserRole('${esc(r.id)}')">Delete</button>
+            </td>
+          </tr>`).join("")}
+        ${rows.length ? "" : `<tr><td colspan="4"><div class="empty">No custom roles yet — every other signed-in user currently has full access to every tab.</div></td></tr>`}
+      </tbody>
+    </table></div>
+  `;
+}
+function openUserRoleModal(existingId) {
+  if (!isAdmin()) return toast("Admins only.");
+  const r = existingId ? S.userRoles.get(existingId) : null;
+  const tabs = (r && r.tabs) || {};
+  const optionsFor = (tabKey, selected) => {
+    const levels = VIEW_ONLY_TABS.includes(tabKey) ? ["view", "none"] : ["edit", "view", "none"];
+    const cur = selected || (VIEW_ONLY_TABS.includes(tabKey) ? "view" : "edit");
+    return levels.map(lv => `<option value="${lv}" ${lv === cur ? "selected" : ""}>${lv === "edit" ? "Edit" : lv === "view" ? "View only" : "Hidden"}</option>`).join("");
+  };
+  openModal(`
+    <div class="modal-head"><h3>${r ? "Edit user access" : "Add user"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="field"><label>Email</label><input type="email" id="ur_email" value="${esc(r ? (r.email || r.id) : "")}" ${r ? "disabled" : ""} placeholder="name@mgocandoniaccounting.org"></div>
+      <div class="field"><label><input type="checkbox" id="ur_admin" ${r && r.is_admin ? "checked" : ""} onchange="document.getElementById('ur_tabgrid').style.opacity = this.checked ? '.45' : '1'; document.getElementById('ur_tabgrid').style.pointerEvents = this.checked ? 'none' : 'auto';"> Full Admin (sees every tab, can edit everything, manages other users here)</label></div>
+      <div id="ur_tabgrid" style="${r && r.is_admin ? "opacity:.45;pointer-events:none;" : ""}">
+        <p class="subtle" style="margin:10px 0 6px;">Per-tab access (ignored above if Full Admin is checked):</p>
+        <div class="fieldrow" style="flex-wrap:wrap;">
+          ${PERMISSION_TAB_ORDER.map(t => `
+            <div class="field" style="min-width:170px;flex:1;">
+              <label>${esc(permissionTabLabel(t))}</label>
+              <select id="ur_tab_${t}">${optionsFor(t, tabs[t])}</select>
+            </div>`).join("")}
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      ${r ? `<button class="btn danger" style="margin-right:auto" onclick="deleteUserRole('${esc(existingId)}')">Delete</button>` : ""}
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="saveUserRole(${r ? `'${esc(existingId)}'` : "null"})">${r ? "Save changes" : "Add user"}</button>
+    </div>
+  `);
+}
+async function saveUserRole(existingId) {
+  if (!isAdmin()) return toast("Admins only.");
+  const emailInput = document.getElementById("ur_email").value.trim().toLowerCase();
+  const emailKey = existingId || emailInput;
+  if (!existingId) {
+    if (!emailInput || !emailInput.includes("@")) return toast("Enter a valid email address.");
+    if (isHardcodedAdmin(emailInput)) return toast("That account is already a permanent Admin — no role entry needed.");
+    if (S.userRoles.has(emailInput)) return toast("That email already has a role — edit it instead of adding a duplicate.");
+  }
+  const isAdminChecked = document.getElementById("ur_admin").checked;
+  const tabsOut = {};
+  PERMISSION_TAB_ORDER.forEach(t => { tabsOut[t] = document.getElementById(`ur_tab_${t}`).value; });
+  const existing = existingId ? S.userRoles.get(existingId) : null;
+  const payload = {
+    email: emailKey, is_admin: isAdminChecked, tabs: tabsOut,
+    updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+  };
+  if (!existing) { payload.created_by = viewerLabel(); payload.created_at = new Date().toISOString(); }
+  try {
+    await S.db.collection("user_roles").doc(emailKey).set({ ...(existing || {}), ...payload });
+    toast("Saved.");
+    closeModal();
+  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+}
+async function deleteUserRole(id) {
+  if (!isAdmin()) return toast("Admins only.");
+  if (!confirm("Delete this user's role? They will revert to FULL access to every tab (restrictions here are opt-in) until a new role is set.")) return;
+  await S.db.collection("user_roles").doc(id).delete();
+  toast("Role deleted — that user now has full access again.");
+  closeModal();
+}
+
+/** Self-service "change my password" — available to any already-signed-in email/password user
+ *  (see initApp(), which hides the sidebar button entirely for a Google-signed-in account, since
+ *  there's no password on this account to change). Requires re-entering the current password
+ *  because Firebase requires a "recent login" to change a password, and reauthenticating with it
+ *  is the simplest way to get one without forcing a full sign-out/sign-in round trip. */
+function openChangePasswordModal() {
+  openModal(`
+    <div class="modal-head"><h3>Change password</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="signin-error" id="pwChangeError"></div>
+      <div class="field"><label>Current password</label><input type="password" id="pw_current" autocomplete="current-password"></div>
+      <div class="field"><label>New password</label><input type="password" id="pw_new" autocomplete="new-password"></div>
+      <div class="field"><label>Confirm new password</label><input type="password" id="pw_confirm" autocomplete="new-password"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" id="pwChangeSaveBtn" onclick="submitChangePassword()">Change password</button>
+    </div>
+  `);
+}
+function friendlyPasswordChangeError(err) {
+  const code = err && err.code;
+  switch (code) {
+    case "auth/wrong-password":
+    case "auth/invalid-credential": return "Current password is incorrect.";
+    case "auth/weak-password": return "New password is too weak — use at least 6 characters.";
+    case "auth/too-many-requests": return "Too many attempts — please wait a moment and try again.";
+    case "auth/requires-recent-login": return "For your security, please sign out, sign back in, then try again.";
+    default: return "Couldn't change your password — please try again.";
+  }
+}
+async function submitChangePassword() {
+  const errEl = document.getElementById("pwChangeError");
+  const showErr = msg => { errEl.textContent = msg; errEl.classList.add("show"); };
+  errEl.classList.remove("show");
+  const current = document.getElementById("pw_current").value;
+  const next = document.getElementById("pw_new").value;
+  const confirmPw = document.getElementById("pw_confirm").value;
+  if (!current) return showErr("Enter your current password.");
+  if (next.length < 6) return showErr("New password must be at least 6 characters.");
+  if (next !== confirmPw) return showErr("New password and confirmation don't match.");
+  const btn = document.getElementById("pwChangeSaveBtn");
+  btn.disabled = true; btn.textContent = "Changing…";
+  try {
+    await changePassword(current, next);
+    toast("Password changed.");
+    closeModal();
+  } catch (e) {
+    console.error(e);
+    showErr(friendlyPasswordChangeError(e));
+  } finally {
+    btn.disabled = false; btn.textContent = "Change password";
+  }
 }
 
 /* ============================================================
@@ -3059,6 +3337,7 @@ function exportParIcsCsv() {
 function renderParIcs() {
   const el = document.getElementById("view-parics");
   if (!el) return; // older index.html without the PAR/ICS nav tab/container — nothing to render into
+  if (!hasTabAccess("parics")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const focus = captureFocus("view-parics");
   const f = S.parIcsFilter;
@@ -3077,8 +3356,9 @@ function renderParIcs() {
         </select>
         <span style="flex:1"></span>
         <button class="btn" onclick="exportParIcsCsv()">Download CSV</button>
+        ${canEdit("parics") ? `
         <button class="btn primary" onclick="openParModal()">+ New PAR (PPE)</button>
-        <button class="btn primary" onclick="openIcsModal()">+ New ICS (Semi-Expendable)</button>
+        <button class="btn primary" onclick="openIcsModal()">+ New ICS (Semi-Expendable)</button>` : ""}
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
         <thead><tr><th>Type</th><th>Number</th><th>Property No./SN</th><th>Dept/Office &amp; Entity</th><th>Description</th><th class="num">Qty</th><th class="num">Amount</th><th>Date</th><th>Status</th><th style="width:230px;">Actions</th></tr></thead>
@@ -3103,10 +3383,10 @@ function renderParIcs() {
               <button class="btn small" style="margin-right:4px;" onclick="${isPar ? "printPar" : "printIcs"}('${r.id}')">Print</button>
               ${r.recorded
                 ? `<a href="#" onclick="openAssetDetail('${r.recorded_asset_id}');return false;" style="font-size:11px;margin-right:8px;">view item</a>
-                   <button class="btn small ghost" onclick="unrecordParIcs('${r.id}')">↩ Unrecord</button>`
-                : `<button class="btn small" style="margin-right:4px;" onclick="${isPar ? "openParModal" : "openIcsModal"}('${r.id}')">Edit</button>
+                   ${canEdit("parics") ? `<button class="btn small ghost" onclick="unrecordParIcs('${r.id}')">↩ Unrecord</button>` : ""}`
+                : canEdit("parics") ? `<button class="btn small" style="margin-right:4px;" onclick="${isPar ? "openParModal" : "openIcsModal"}('${r.id}')">Edit</button>
                    <button class="btn small primary" style="margin-right:4px;" onclick="recordParIcsChoice('${r.id}')">Record →</button>
-                   <button class="btn small danger" onclick="deleteParIcs('${r.id}')">Delete</button>`}
+                   <button class="btn small danger" onclick="deleteParIcs('${r.id}')">Delete</button>` : ""}
             </td>
           </tr>`;
         }).join("") : `<tr><td colspan="10"><div class="empty">No PAR/ICS records match these filters.</div></td></tr>`}
@@ -3220,6 +3500,7 @@ function openIcsModal(existingId) {
 
 async function saveParIcs(docType, existingId) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("parics")) return;
   const existing = existingId ? S.parIcs.get(existingId) : null;
   if (existing && existing.recorded) return toast("Already recorded — can't be edited.");
   try {
@@ -3303,6 +3584,7 @@ async function saveParIcs(docType, existingId) {
 }
 
 async function deleteParIcs(id) {
+  if (blockIfViewOnly("parics")) return;
   const r = S.parIcs.get(id);
   if (!r) return;
   if (r.recorded) return toast("Can't delete — already recorded into the Asset Register.");
@@ -3338,6 +3620,7 @@ function recordParIcsChoice(id) {
  *  the register" step. openAssetModal() locks the Item Type (PAR → PPE, ICS → Semi-Expendable) and
  *  sets S.linkParIcsId so saveAsset() marks this record "recorded" once the new asset is saved. */
 function recordParIcsAsNew(id) {
+  if (blockIfViewOnly("parics")) return;
   const r = S.parIcs.get(id);
   if (!r) return;
   if (r.recorded) return toast("Already recorded.");
@@ -3410,6 +3693,7 @@ function renderMatchParIcsResults(id, q) {
  *  creating a new asset. Marks the record Recorded (same as the create-new path) and, if the asset
  *  doesn't already reference a source PAR/ICS, backfills that link onto it too for traceability. */
 async function matchParIcsToExisting(parIcsId, assetId) {
+  if (blockIfViewOnly("parics")) return;
   const r = S.parIcs.get(parIcsId);
   const a = S.assets.get(assetId);
   if (!r || !a) return;
@@ -3435,6 +3719,7 @@ async function matchParIcsToExisting(parIcsId, assetId) {
  *  at this record, that backlink is cleared too, so the asset stops claiming a source that's now
  *  pending again. */
 async function unrecordParIcs(id) {
+  if (blockIfViewOnly("parics")) return;
   const r = S.parIcs.get(id);
   if (!r) return;
   if (!r.recorded) return;
@@ -3696,6 +3981,7 @@ function exportPtrItrCsv() {
 function renderPtrItr() {
   const el = document.getElementById("view-ptritr");
   if (!el) return; // older index.html without the PTR/ITR nav tab/container — nothing to render into
+  if (!hasTabAccess("ptritr")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const focus = captureFocus("view-ptritr");
   const f = S.ptrItrFilter;
@@ -3729,7 +4015,7 @@ function renderPtrItr() {
             <td class="mono">${fmtDate(r.date)}</td>
             <td>
               <button class="btn small" style="margin-right:4px;" onclick="${isPtr ? "printPtr" : "printItr"}('${r.id}')">Print</button>
-              <button class="btn small ghost" onclick="openEditPtrItrModal('${r.id}')">Edit</button>
+              ${canEdit("ptritr") ? `<button class="btn small ghost" onclick="openEditPtrItrModal('${r.id}')">Edit</button>` : ""}
             </td>
           </tr>`;
         }).join("") : `<tr><td colspan="8"><div class="empty">No PTR/ITR records yet — transfer an item's location or accountable officer (from the Asset Register) to generate one.</div></td></tr>`}
@@ -3801,6 +4087,7 @@ function openEditPtrItrModal(id) {
  *  still-current one. */
 async function savePtrItrEdit(id) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("ptritr")) return;
   const r = S.ptrItr.get(id);
   if (!r) return;
   const fund = r.fund || "GF";
@@ -4023,6 +4310,7 @@ function printItr(id) {
 function renderReports() {
   const el = document.getElementById("view-reports");
   if (!el) return; // older index.html without the Reports nav tab/container — nothing to render into
+  if (!hasTabAccess("reports")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
   const focus = captureFocus("view-reports");
   const f = S.reportsFilter;
@@ -4276,6 +4564,7 @@ function openSxLedgerEntryModal(assetId) {
 }
 async function saveSxLedgerEntry(assetId) {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("register")) return;
   const a = S.assets.get(assetId);
   if (!a) return;
   const entry = {
@@ -4341,6 +4630,7 @@ function parseSxBulkRows(text) {
 }
 async function submitSxBulkAdd() {
   if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("register")) return;
   const rows = parseSxBulkRows(document.getElementById("sxBulkPaste").value);
   if (!rows.length) return toast("No valid rows found.");
   const fund = S.currentFund;
@@ -4490,6 +4780,8 @@ function renderAll() {
   renderParIcs();
   renderPtrItr();
   renderSwa();
+  renderUsers();
+  applyAccessControlToNav();
 }
 function renderPeriodStatus() {
   const last = lastPostedPeriod(S.currentFund);
@@ -4507,6 +4799,7 @@ const VIEW_TITLES = {
   parics: ["PAR / ICS", "Generate a Property Acknowledgment Receipt (PPE) or Inventory Custodian Slip (Semi-Expendable) — saved as a pending record until you record it into the Asset Register"],
   ptritr: ["PTR / ITR", "Property Transfer Report (PPE) or Inventory Transfer Report (Semi-Expendable) — generated automatically whenever an item's location or accountable officer is transferred"],
   swa: ["SWA", "Statement of Works Accomplished — upload the document, then match it to a Construction in Progress billing"],
+  users: ["Users & Roles", "Manage who can sign in, which tabs they can see, and whether they can edit or only view — Admins only"],
 };
 /** Sets the topbar title/subtitle from the current view + fund. Called on both view changes and
  *  fund switches, since the subtitle always names which fund's books are showing. */
@@ -4520,6 +4813,24 @@ function setView(v) {
   document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("active", b.dataset.view === v));
   document.querySelectorAll(".view").forEach(el => el.classList.toggle("active", el.id === "view-" + v));
   refreshTopbar();
+}
+/** Hides nav tabs the current signed-in user has no access to at all ("None"), and hides the
+ *  admin-only "Users & Roles" tab from everyone else. Re-run on every render (roles can change
+ *  live, e.g. an Admin editing someone else's access while they're signed in elsewhere) — cheap,
+ *  it's just toggling a `hidden` attribute. If the tab currently being viewed just became hidden
+ *  (access was revoked, or this is the first render for a restricted user landing on a tab they
+ *  don't have), hops to the first tab still visible. */
+function applyAccessControlToNav() {
+  const admin = isAdmin();
+  document.querySelectorAll("#nav button").forEach(b => {
+    const v = b.dataset.view;
+    b.hidden = v === "users" ? !admin : !hasTabAccess(v);
+  });
+  const activeBtn = document.querySelector(`#nav button[data-view="${S.view}"]`);
+  if (!activeBtn || activeBtn.hidden) {
+    const firstVisible = document.querySelector("#nav button:not([hidden])");
+    if (firstVisible) setView(firstVisible.dataset.view);
+  }
 }
 /** Switches which fund's books are in view. Every render function reads S.currentFund, so this is
  *  the one place that needs to re-render everything; period selections are cleared since a period
@@ -4555,6 +4866,8 @@ function bindStaticUI() {
   document.querySelectorAll("#fundSwitch button").forEach(b => b.addEventListener("click", () => setFund(b.dataset.fund)));
   const overlay = document.getElementById("modalOverlay");
   if (overlay) overlay.addEventListener("click", e => { if (e.target.id === "modalOverlay") closeModal(); });
+  const changePwBtn = document.getElementById("changePasswordBtn");
+  if (changePwBtn) changePwBtn.addEventListener("click", openChangePasswordModal);
 }
 
 /* ---------- entry point, called by js/main.js once Firebase Auth confirms a signed-in user ---------- */
@@ -4567,6 +4880,13 @@ export function initApp(user) {
   document.querySelectorAll("#fundSwitch button").forEach(b => b.classList.toggle("active", b.dataset.fund === S.currentFund));
   const emailEl = document.getElementById("authEmail");
   if (emailEl) emailEl.textContent = viewerLabel();
+  // "Change password" only makes sense for an email/password account — a Google-signed-in user has
+  // no password on this account to change (their password, if any, lives with Google).
+  const changePwBtn = document.getElementById("changePasswordBtn");
+  if (changePwBtn) {
+    const providerId = user.providerData && user.providerData[0] && user.providerData[0].providerId;
+    changePwBtn.hidden = providerId !== "password";
+  }
   bindStaticUI();
   setView(S.view);
   initDb();
@@ -4577,7 +4897,7 @@ export function initApp(user) {
    (ES module top-level declarations are NOT added to `window` automatically, unlike classic scripts,
    so anything called from an inline event handler attribute must be attached explicitly.) */
 Object.assign(window, {
-  setView, openBulkAddModal, openAssetModal, openAssetDetail, closeModal,
+  setView, renderAll, openBulkAddModal, openAssetModal, openAssetDetail, closeModal,
   openRetireModal, submitRetire, saveAsset, submitBulkAdd, postPeriod, undoPosting,
   exportJevCsv, exportReconCsv, saveTbSnapshot,
   openRevalueModal, revalueAsset,
@@ -4599,4 +4919,6 @@ Object.assign(window, {
   recordParIcsChoice, recordParIcsAsNew, openMatchParIcsModal, matchParIcsToExisting, unrecordParIcs,
   printPtr, printItr, exportPtrItrCsv, openEditPtrItrModal, savePtrItrEdit,
   openSwaModal, saveSwa, deleteSwa, unmatchSwa, exportSwaCsv, openMatchSwaModal, pickSwaForBilling, unmatchDraftSwa,
+  openUserRoleModal, saveUserRole, deleteUserRole,
+  openChangePasswordModal, submitChangePassword,
 });
