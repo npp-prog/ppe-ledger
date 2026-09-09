@@ -178,6 +178,10 @@ const S = {
   cipProjects: new Map(), // id -> CIP project doc (own collection, separate from assets)
   parIcs: new Map(),      // id -> PAR/ICS record doc (own collection, separate from assets — a
                            // "pending" one is a parking record, not yet in the Asset Register)
+  ptrItr: new Map(),      // id -> PTR/ITR record doc (own collection) — generated automatically by
+                           // transferAsset() every time an item's location/accountable officer is
+                           // transferred; unlike PAR/ICS there's no pending/recorded lifecycle here,
+                           // since the transfer itself already happened — see the PTR/ITR section.
   linkParIcsId: null,     // set by recordParIcsAsNew() right before opening the Add Item modal — tells
                            // saveAsset() which pending PAR/ICS record to mark "recorded" once the
                            // new asset is created. Reset to null at the top of every openAssetModal()
@@ -191,6 +195,7 @@ const S = {
   reportsFilter: { q: "", category: "", status: "active", officer: "", itemType: "", classification: "" },
   cipFilter: { q: "", status: "in_progress" },
   parIcsFilter: { q: "", docType: "", status: "pending" },
+  ptrItrFilter: { q: "", docType: "" },
   depPeriod: null,   // chosen period for Monthly Depreciation view
   reconPeriod: null, // chosen period for Reconciliation view
   reconDraft: "",    // unsaved Trial Balance text (pasted or uploaded) not yet tied to a saved period
@@ -443,6 +448,10 @@ function initDb() {
     );
     db.collection("par_ics").onSnapshot(
       snap => { S.parIcs.clear(); snap.docs.forEach(d => S.parIcs.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
+      err => console.error(err)
+    );
+    db.collection("ptr_itr").onSnapshot(
+      snap => { S.ptrItr.clear(); snap.docs.forEach(d => S.ptrItr.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
       err => console.error(err)
     );
     // Semi-Expendable Property items live in this same "assets" collection (tagged item_type:
@@ -1280,15 +1289,24 @@ async function revalueAsset(id) {
 /* ---------- Transfer history (location / accountable-officer changes) ----------
    Modeled directly on openRevalueModal/revalueAsset above: appends an audit-trail entry to an
    array field on the asset doc (here, `transfers`) rather than overwriting history, and the new
-   location/officer become the asset's current values going forward. */
+   location/officer become the asset's current values going forward. Saving a transfer ALSO
+   generates a PTR (Property Transfer Report, PPE) or ITR (Inventory Transfer Report,
+   Semi-Expendable) in its own "ptr_itr" collection — see the PTR/ITR section below — linked back
+   to this specific transfers[] entry via a shared `id` so editing the PTR/ITR later can correct
+   the same history entry (and the asset's current location/officer, if it's still the latest). */
 function openTransferModal(id) {
   const a = S.assets.get(id);
   if (!a) return;
+  const isSx = itemTypeOf(a) === "sx";
+  const label = isSx ? "ITR" : "PTR";
+  const fund = a.fund || "GF";
+  const today = new Date().toISOString().slice(0, 10);
+  const suggestedNumber = isSx ? nextItrNumber(fund, today) : nextPtrNumber(fund, today);
   openModal(`
     <div class="modal-head"><h3>Transfer asset</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
       <p style="margin-top:0;">${esc(a.account_name)} ${a.property_id ? "— " + esc(a.property_id) : ""}</p>
-      <p class="subtle" style="font-size:12.5px;">Use this to record a change in location and/or the accountable officer/custodian — the old values stay on record below.</p>
+      <p class="subtle" style="font-size:12.5px;">Use this to record a change in location and/or the accountable officer/custodian — the old values stay on record below. Saving this also generates a printable ${label} (${isSx ? "Inventory" : "Property"} Transfer Report), found under the PTR / ITR tab.</p>
       <div class="kv" style="margin-bottom:14px;">
         <dt>Current location</dt><dd>${esc(a.location) || "—"}</dd>
         <dt>Current accountable officer</dt><dd>${esc(a.accountable_officer) || "—"}</dd>
@@ -1298,8 +1316,33 @@ function openTransferModal(id) {
         <div class="field"><label>New accountable officer</label><input id="tr_officer" value="${esc(a.accountable_officer)}"></div>
       </div>
       <div class="fieldrow">
-        <div class="field"><label>Effective date</label><input type="date" id="tr_date" value="${new Date().toISOString().slice(0, 10)}"></div>
+        <div class="field"><label>Effective date</label><input type="date" id="tr_date" value="${today}"></div>
         <div class="field"><label>Reason / reference</label><input id="tr_reason" placeholder="e.g. Reassigned to Engineering Office"></div>
+      </div>
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <div class="fieldrow">
+        <div class="field"><label>${label} No. <span class="subtle" style="font-weight:400;">(pre-filled, edit if needed)</span></label><input id="tr_number" class="mono" value="${esc(suggestedNumber)}" placeholder="YYYY-MM-NNNN"></div>
+        <div class="field"><label>Condition of ${isSx ? "inventory" : "PPE"}</label><input id="tr_condition" placeholder="e.g. SERVICEABLE"></div>
+      </div>
+      <div class="field">
+        <label>Transfer type</label>
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px;">
+          <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;"><input type="radio" name="tr_type" value="donation"> Donation</label>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;"><input type="radio" name="tr_type" value="reassignment" checked> Reassignment</label>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;"><input type="radio" name="tr_type" value="relocate"> Relocate</label>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;"><input type="radio" name="tr_type" value="others"> Others</label>
+          <input id="tr_type_other" style="flex:1;min-width:160px;" placeholder="Specify" disabled>
+        </div>
+      </div>
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <p class="subtle" style="font-size:12px;margin-top:0;">Signatories for the printed ${label} (optional — can also be filled in later from Edit)</p>
+      <div class="fieldrow">
+        <div class="field"><label>Approved by</label><input id="tr_approved_name" placeholder="Name"></div>
+        <div class="field"><label>Position/Office</label><input id="tr_approved_pos" placeholder="e.g. Municipal Mayor"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Released/Issued by</label><input id="tr_issued_name" placeholder="Name"></div>
+        <div class="field"><label>Position/Office</label><input id="tr_issued_pos" value="PROPERTY OFFICER"></div>
       </div>
       ${a.transfers && a.transfers.length ? `
         <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
@@ -1314,30 +1357,65 @@ function openTransferModal(id) {
       <button class="btn primary" onclick="transferAsset('${a.id}')">Save transfer</button>
     </div>
   `);
+  const otherInput = document.getElementById("tr_type_other");
+  document.querySelectorAll('input[name="tr_type"]').forEach(rb => rb.addEventListener("change", () => {
+    const isOthers = document.querySelector('input[name="tr_type"][value="others"]').checked;
+    otherInput.disabled = !isOthers;
+    if (!isOthers) otherInput.value = "";
+  }));
 }
 
 async function transferAsset(id) {
   if (!S.db) return toast("No shared database in this view.");
   const a = S.assets.get(id);
   if (!a) return;
+  const isSx = itemTypeOf(a) === "sx";
+  const docType = isSx ? "itr" : "ptr";
+  const fund = a.fund || "GF";
   const newLocation = document.getElementById("tr_location").value.trim();
   const newOfficer = document.getElementById("tr_officer").value.trim();
   const date = document.getElementById("tr_date").value || new Date().toISOString().slice(0, 10);
   const reason = document.getElementById("tr_reason").value.trim();
   if (!newLocation && !newOfficer) return toast("Enter a new location or accountable officer.");
   if (newLocation === (a.location || "") && newOfficer === (a.accountable_officer || "")) return toast("No change to save.");
+  const enteredNumber = document.getElementById("tr_number").value.trim();
+  const number = enteredNumber || (isSx ? nextItrNumber(fund, date) : nextPtrNumber(fund, date));
+  if (ptrItrNumberTaken(fund, docType, number)) return toast(`${docType.toUpperCase()} No. ${number} is already used by another ${docType.toUpperCase()} in this fund.`);
+  const transferType = (document.querySelector('input[name="tr_type"]:checked') || {}).value || "reassignment";
+  const transferTypeOther = document.getElementById("tr_type_other").value.trim();
+  const condition = document.getElementById("tr_condition").value.trim();
+  const approvedName = document.getElementById("tr_approved_name").value.trim();
+  const approvedPos = document.getElementById("tr_approved_pos").value.trim();
+  const issuedName = document.getElementById("tr_issued_name").value.trim();
+  const issuedPos = document.getElementById("tr_issued_pos").value.trim();
+  const entryId = uid("tr");
   const entry = {
-    date, old_location: a.location || "", new_location: newLocation || a.location || "",
+    id: entryId, date, old_location: a.location || "", new_location: newLocation || a.location || "",
     old_accountable_officer: a.accountable_officer || "", new_accountable_officer: newOfficer || a.accountable_officer || "",
     reason, by: viewerLabel(), at: new Date().toISOString(),
   };
   const transfers = [...(a.transfers || []), entry];
+  const ptrItrRec = {
+    doc_type: docType, fund, number, date, asset_id: id, transfer_entry_id: entryId,
+    property_no: a.property_id || "", sen: a.sen || "", date_acquired: a.date_acquired || "",
+    description: a.description || "", amount: isSx ? sxAdjustedCost(a) : (a.cost || 0),
+    condition, entity_name: entry.new_location,
+    transfer_type: transferType, transfer_type_other: transferType === "others" ? transferTypeOther : "",
+    from_location: entry.old_location, to_location: entry.new_location,
+    from_officer: entry.old_accountable_officer, to_officer: entry.new_accountable_officer,
+    reason,
+    approved_by_name: approvedName, approved_by_position: approvedPos,
+    issued_by_name: issuedName, issued_by_position: issuedPos || "PROPERTY OFFICER",
+    received_by_name: entry.new_accountable_officer, received_by_position: "",
+    created_by: viewerLabel(), created_at: new Date().toISOString(),
+  };
   try {
     await S.db.collection("assets").doc(id).update({
       location: entry.new_location, accountable_officer: entry.new_accountable_officer, transfers,
       updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     });
-    toast("Transfer saved.");
+    await S.db.collection("ptr_itr").add(ptrItrRec);
+    toast(`Transfer saved — ${docType.toUpperCase()} ${number} generated.`);
     closeModal();
   } catch (e) { console.error(e); toast("Couldn't save — try again."); }
 }
@@ -3205,6 +3283,391 @@ function printIcs(id) {
 }
 
 /* ============================================================
+   PTR / ITR — Property Transfer Report (issued for PPE) and Inventory
+   Transfer Report (issued for Semi-Expendable Property, Annex A.5),
+   matching the two official Candoni forms supplied as reference.
+
+   Unlike PAR/ICS, these are NOT parking records — a transfer already
+   happened the moment someone saves the Transfer modal, so the PTR/ITR is
+   generated automatically right then (see transferAsset() above) rather
+   than created independently and "recorded" later. Each PTR/ITR is linked
+   back to one specific entry in the asset's own `transfers[]` array via a
+   shared `transfer_entry_id`, so editing the PTR/ITR here (openEditPtrItrModal
+   / savePtrItrEdit) can correct that same history entry — and, if it was
+   still the asset's most recent transfer, the Asset Register's current
+   location/accountable officer too. An older transfer can still be
+   corrected for the record, but won't overwrite a newer, still-current one.
+   ============================================================ */
+function ptrItrInFund(fund) { return [...S.ptrItr.values()].filter(r => (r.fund || "GF") === fund); }
+/** Next PTR/ITR No. for a fund + issue date, format YYYY-MM-NNNN — same convention as the PAR
+ *  numbering (nextParNumber), sequential within that fund/month/doc_type. */
+function nextPtrNumber(fund, dateStr) {
+  const ym = (dateStr || new Date().toISOString().slice(0, 10)).slice(0, 7);
+  const n = ptrItrInFund(fund).filter(r => r.doc_type === "ptr" && (r.date || "").slice(0, 7) === ym).length + 1;
+  return `${ym}-${String(n).padStart(4, "0")}`;
+}
+function nextItrNumber(fund, dateStr) {
+  const ym = (dateStr || new Date().toISOString().slice(0, 10)).slice(0, 7);
+  const n = ptrItrInFund(fund).filter(r => r.doc_type === "itr" && (r.date || "").slice(0, 7) === ym).length + 1;
+  return `${ym}-${String(n).padStart(4, "0")}`;
+}
+/** True if `number` is already used by a different PTR/ITR of the same doc_type in this fund —
+ *  checked before saving a manually-entered (or manually-edited) number. `excludeId` lets an
+ *  existing record keep its own number unflagged when editing. */
+function ptrItrNumberTaken(fund, docType, number, excludeId) {
+  return ptrItrInFund(fund).some(r => r.doc_type === docType && r.number === number && r.id !== excludeId);
+}
+function filterPtrItrRows(f) {
+  let rows = ptrItrInFund(S.currentFund);
+  if (f.docType) rows = rows.filter(r => r.doc_type === f.docType);
+  if (f.q) {
+    const q = f.q.toLowerCase();
+    rows = rows.filter(r => [r.number, r.description, r.property_no, r.sen, r.from_officer, r.to_officer, r.from_location, r.to_location]
+      .some(v => v && String(v).toLowerCase().includes(q)));
+  }
+  rows.sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
+  return rows;
+}
+/** Summary CSV of PTR/ITR records — respects the tab's current search/type filters, same pattern
+ *  as exportParIcsCsv. */
+function exportPtrItrCsv() {
+  const rows = filterPtrItrRows(S.ptrItrFilter);
+  const out = [["Fund", "Type", "Number", "Date", "Property No.", "SEN", "Description", "From Location", "To Location", "From Officer", "To Officer", "Amount", "Condition", "Transfer Type", "Reason"]];
+  rows.forEach(r => {
+    const isPtr = r.doc_type === "ptr";
+    out.push([
+      fundLabel(r.fund || "GF"), isPtr ? "PTR (PPE)" : "ITR (Semi-Expendable)", r.number || "", r.date || "",
+      r.property_no || "", r.sen || "", r.description || "", r.from_location || "", r.to_location || "",
+      r.from_officer || "", r.to_officer || "", (r.amount || 0).toFixed(2), r.condition || "",
+      r.transfer_type === "others" ? `Others — ${r.transfer_type_other || ""}` : (r.transfer_type || ""),
+      r.reason || "",
+    ]);
+  });
+  const csv = out.map(r => r.map(csvField).join(",")).join("\n");
+  const typePart = S.ptrItrFilter.docType ? `_${S.ptrItrFilter.docType.toUpperCase()}` : "";
+  browserDownload(`PTR_ITR_Summary_${S.currentFund}${typePart}_${new Date().toISOString().slice(0, 10)}.csv`, csv, "text/csv;charset=utf-8;");
+  toast("Saved.");
+}
+function renderPtrItr() {
+  const el = document.getElementById("view-ptritr");
+  if (!el) return; // older index.html without the PTR/ITR nav tab/container — nothing to render into
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const focus = captureFocus("view-ptritr");
+  const f = S.ptrItrFilter;
+  const rows = filterPtrItrRows(f);
+  el.innerHTML = `
+    <div class="banner info" style="margin-bottom:14px;">A Property Transfer Report (PPE) or Inventory Transfer Report (Semi-Expendable) is generated automatically whenever an item's location or accountable officer is transferred — see the "Transfer" action on any item in the Asset Register. Edit a record here to correct it; editing the item's most recent transfer also updates its current location/officer in the Asset Register.</div>
+    <div class="panel">
+      <div class="toolbar">
+        <input type="text" class="grow" id="ptSearch" placeholder="Search number, description, property/SEN, officer, location…" value="${esc(f.q)}">
+        <select id="ptType"><option value="">PTR &amp; ITR</option><option value="ptr" ${f.docType === "ptr" ? "selected" : ""}>PTR only (PPE)</option><option value="itr" ${f.docType === "itr" ? "selected" : ""}>ITR only (Semi-Expendable)</option></select>
+        <span style="flex:1"></span>
+        <button class="btn" onclick="exportPtrItrCsv()">Download CSV</button>
+      </div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>Type</th><th>Number</th><th>Property No./SN</th><th>Description</th><th>From &rarr; To</th><th class="num">Amount</th><th>Date</th><th style="width:150px;">Actions</th></tr></thead>
+        <tbody>${rows.length ? rows.map(r => {
+          const isPtr = r.doc_type === "ptr";
+          const propNo = isPtr ? r.property_no : (r.sen || r.property_no);
+          const locChanged = r.to_location && r.to_location !== r.from_location;
+          const officerChanged = r.to_officer && r.to_officer !== r.from_officer;
+          const changeParts = [];
+          if (locChanged) changeParts.push(`${esc(r.from_location) || "—"} &rarr; ${esc(r.to_location)}`);
+          if (officerChanged) changeParts.push(`${esc(r.from_officer) || "—"} &rarr; ${esc(r.to_officer)}`);
+          return `<tr>
+            <td>${isPtr ? '<span class="pill good">PTR</span>' : '<span class="pill neutral">ITR</span>'}</td>
+            <td class="mono">${esc(r.number)}</td>
+            <td class="mono">${esc(propNo) || "—"}</td>
+            <td class="truncate" title="${esc(r.description)}">${esc(r.description) || "—"}</td>
+            <td style="font-size:12px;">${changeParts.join("<br>") || "—"}</td>
+            <td class="num mono">${fmtMoney(r.amount)}</td>
+            <td class="mono">${fmtDate(r.date)}</td>
+            <td>
+              <button class="btn small" style="margin-right:4px;" onclick="${isPtr ? "printPtr" : "printItr"}('${r.id}')">Print</button>
+              <button class="btn small ghost" onclick="openEditPtrItrModal('${r.id}')">Edit</button>
+            </td>
+          </tr>`;
+        }).join("") : `<tr><td colspan="8"><div class="empty">No PTR/ITR records yet — transfer an item's location or accountable officer (from the Asset Register) to generate one.</div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>
+  `;
+  document.getElementById("ptSearch").addEventListener("input", e => { S.ptrItrFilter.q = e.target.value; renderPtrItr(); });
+  document.getElementById("ptType").addEventListener("change", e => { S.ptrItrFilter.docType = e.target.value; renderPtrItr(); });
+  restoreFocus(focus);
+}
+/** Lets you correct a filed PTR/ITR — including the New location/officer it recorded. Deliberately
+ *  does NOT let the Fund be changed here (that's fixed by the underlying asset, and editing this
+ *  record can't move an asset between funds), so Fund is shown as context only. */
+function openEditPtrItrModal(id) {
+  const r = S.ptrItr.get(id);
+  if (!r) return;
+  const isPtr = r.doc_type === "ptr";
+  const label = isPtr ? "PTR" : "ITR";
+  openModal(`
+    <div class="modal-head"><h3>Edit ${label} ${esc(r.number)}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p class="subtle" style="margin-top:0;">Fund: ${esc(fundLabel(r.fund || "GF"))} · Editing this ${label} corrects the filed transfer report. If this was the item's most recent transfer, the Asset Register's current location/accountable officer are updated to match; if a newer transfer has happened since, only this historical record is corrected.</p>
+      <div class="fieldrow">
+        <div class="field"><label>${label} No.</label><input id="e_number" class="mono" value="${esc(r.number)}"></div>
+        <div class="field"><label>Date</label><input type="date" id="e_date" value="${r.date || ""}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>New location / office</label><input id="e_location" value="${esc(r.to_location)}"></div>
+        <div class="field"><label>New accountable officer</label><input id="e_officer" value="${esc(r.to_officer)}"></div>
+      </div>
+      <div class="field"><label>Reason / reference</label><input id="e_reason" value="${esc(r.reason)}"></div>
+      <div class="field">
+        <label>Transfer type</label>
+        <div style="display:flex;flex-wrap:wrap;align-items:center;gap:14px;">
+          ${["donation", "reassignment", "relocate", "others"].map(v => `<label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;"><input type="radio" name="e_type" value="${v}" ${r.transfer_type === v ? "checked" : ""}> ${v.charAt(0).toUpperCase() + v.slice(1)}</label>`).join("")}
+          <input id="e_type_other" style="flex:1;min-width:160px;" placeholder="Specify" value="${esc(r.transfer_type_other)}" ${r.transfer_type === "others" ? "" : "disabled"}>
+        </div>
+      </div>
+      <div class="field"><label>Condition</label><input id="e_condition" value="${esc(r.condition)}" placeholder="e.g. SERVICEABLE"></div>
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <div class="fieldrow">
+        <div class="field"><label>Approved by</label><input id="e_approved_name" value="${esc(r.approved_by_name)}"></div>
+        <div class="field"><label>Position/Office</label><input id="e_approved_pos" value="${esc(r.approved_by_position)}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Released/Issued by</label><input id="e_issued_name" value="${esc(r.issued_by_name)}"></div>
+        <div class="field"><label>Position/Office</label><input id="e_issued_pos" value="${esc(r.issued_by_position)}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Received by</label><input id="e_received_name" value="${esc(r.received_by_name)}"></div>
+        <div class="field"><label>Position/Office</label><input id="e_received_pos" value="${esc(r.received_by_position)}"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="savePtrItrEdit('${id}')">Save changes</button>
+    </div>
+  `);
+  document.querySelectorAll('input[name="e_type"]').forEach(rb => rb.addEventListener("change", () => {
+    document.getElementById("e_type_other").disabled = !document.querySelector('input[name="e_type"][value="others"]').checked;
+  }));
+}
+/** Saves an edited PTR/ITR, then propagates the correction onto the ONE matching entry in the
+ *  linked asset's transfers[] history (found by transfer_entry_id) — and, only if that was the
+ *  asset's most recent transfer, onto the asset's current location/accountable officer too, so
+ *  correcting a mistake in the latest transfer actually fixes what the Register shows as current.
+ *  An older, superseded transfer can still be corrected for the record without clobbering a newer,
+ *  still-current one. */
+async function savePtrItrEdit(id) {
+  if (!S.db) return toast("No shared database in this view.");
+  const r = S.ptrItr.get(id);
+  if (!r) return;
+  const fund = r.fund || "GF";
+  const number = document.getElementById("e_number").value.trim();
+  const date = document.getElementById("e_date").value || r.date;
+  const newLocation = document.getElementById("e_location").value.trim();
+  const newOfficer = document.getElementById("e_officer").value.trim();
+  const reason = document.getElementById("e_reason").value.trim();
+  if (!number) return toast(`Enter a ${r.doc_type.toUpperCase()} No.`);
+  if (!newLocation && !newOfficer) return toast("Enter a location or accountable officer.");
+  if (ptrItrNumberTaken(fund, r.doc_type, number, id)) return toast(`${r.doc_type.toUpperCase()} No. ${number} is already used by another ${r.doc_type.toUpperCase()} in this fund.`);
+  const transferType = (document.querySelector('input[name="e_type"]:checked') || {}).value || r.transfer_type || "reassignment";
+  const transferTypeOther = document.getElementById("e_type_other").value.trim();
+  const condition = document.getElementById("e_condition").value.trim();
+  const approvedName = document.getElementById("e_approved_name").value.trim();
+  const approvedPos = document.getElementById("e_approved_pos").value.trim();
+  const issuedName = document.getElementById("e_issued_name").value.trim();
+  const issuedPos = document.getElementById("e_issued_pos").value.trim();
+  const receivedName = document.getElementById("e_received_name").value.trim();
+  const receivedPos = document.getElementById("e_received_pos").value.trim();
+  const update = {
+    number, date, to_location: newLocation || r.to_location, to_officer: newOfficer || r.to_officer, reason,
+    entity_name: newLocation || r.entity_name,
+    transfer_type: transferType, transfer_type_other: transferType === "others" ? transferTypeOther : "",
+    condition, approved_by_name: approvedName, approved_by_position: approvedPos,
+    issued_by_name: issuedName, issued_by_position: issuedPos,
+    received_by_name: receivedName, received_by_position: receivedPos,
+    updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+  };
+  try {
+    await S.db.collection("ptr_itr").doc(id).update(update);
+    let msg = `${r.doc_type.toUpperCase()} updated.`;
+    const a = r.asset_id ? S.assets.get(r.asset_id) : null;
+    if (a && a.transfers && a.transfers.length) {
+      const idx = a.transfers.findIndex(t => t.id === r.transfer_entry_id);
+      if (idx !== -1) {
+        const transfers = a.transfers.map((t, i) => i === idx
+          ? { ...t, date, new_location: update.to_location, new_accountable_officer: update.to_officer, reason }
+          : t);
+        const isLatest = idx === transfers.length - 1;
+        const assetUpdate = { transfers, updated_by: viewerLabel(), updated_at: new Date().toISOString() };
+        if (isLatest) { assetUpdate.location = update.to_location; assetUpdate.accountable_officer = update.to_officer; }
+        await S.db.collection("assets").doc(a.id).update(assetUpdate);
+        msg = isLatest
+          ? `${r.doc_type.toUpperCase()} updated — the Asset Register's current location/officer were updated to match.`
+          : `${r.doc_type.toUpperCase()} updated — this was a historical transfer, so the item's current location/officer are unchanged.`;
+      }
+    }
+    toast(msg);
+    closeModal();
+  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+}
+/** Renders the PTR (Property Transfer Report), matching the official Candoni form — Approved by /
+ *  Released-Issued by / Received by signature blocks, a Transfer Type checklist, and one item row
+ *  (plus blank rows to fill the page, same convention as parHtml/icsHtml). */
+function ptrHtml(r) {
+  const totalRows = 20;
+  const blankRows = Math.max(0, totalRows - 1);
+  const checked = t => r.transfer_type === t ? "☑" : "☐";
+  return `
+    <div class="form">
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : ""}
+        <h1>MUNICIPAL GOVERNMENT OF CANDONI</h1>
+        <h2>PROPERTY TRANSFER REPORT</h2>
+      </div>
+      <div class="infoline"><b>From Accountable Officer/Agency/Fund Cluster :</b><span class="val">${esc(r.from_officer)}</span></div>
+      <div class="headrow">
+        <div class="infoline" style="flex:1;margin-bottom:0;"><b>To Accountable Officer/Agency/Fund Cluster :</b><span class="val">${esc(r.to_officer)}</span></div>
+        <div style="text-align:right;"><b>PTR No.:</b><div class="num">${esc(r.number)}</div></div>
+      </div>
+      <div class="infoline" style="justify-content:flex-end;"><b>Date :</b><span class="val" style="flex:none;min-width:120px;">${fmtDateShort(r.date)}</span></div>
+      <div style="margin:8px 0;font-size:11px;">
+        <b>Transfer Type:</b> (check only one) &nbsp;
+        ${checked("donation")} Donation &nbsp;&nbsp; ${checked("relocate")} Relocate &nbsp;&nbsp;
+        ${checked("reassignment")} Reassignment &nbsp;&nbsp; ${checked("others")} Others (Specify) ${r.transfer_type === "others" ? esc(r.transfer_type_other) : "_______________"}
+      </div>
+      <table class="pf">
+        <thead><tr><th style="width:13%">Date Acquired</th><th style="width:15%">Property No.</th><th style="width:42%">Description</th><th style="width:15%">Amount</th><th style="width:15%">Condition of PPE</th></tr></thead>
+        <tbody>
+          <tr>
+            <td style="text-align:center;">${fmtDateShort(r.date_acquired)}</td>
+            <td class="mono" style="text-align:center;">${esc(r.property_no) || ""}</td>
+            <td>${esc(r.description).replace(/\n/g, "<br>")}</td>
+            <td class="num">${fmtNum(r.amount)}</td>
+            <td style="text-align:center;">${esc(r.condition) || ""}</td>
+          </tr>
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
+        </tbody>
+      </table>
+      <div class="infoline" style="margin-top:8px;"><b>Reason for Transfer :</b><span class="val">${esc(r.reason)}</span></div>
+      <div class="sig">
+        <div class="col">
+          <div class="who">Approved by:</div>
+          <div class="name">${esc(r.approved_by_name) || "&nbsp;"}</div>
+          <div class="cap">Signature over Printed Name</div>
+          <div class="pos">${esc(r.approved_by_position) || "&nbsp;"}</div>
+          <div class="poscap">Position/Office</div>
+          <div class="date">&nbsp;</div>
+          <div class="poscap">Date</div>
+        </div>
+        <div class="col">
+          <div class="who">Released/Issued by:</div>
+          <div class="name">${esc(r.issued_by_name) || "&nbsp;"}</div>
+          <div class="cap">Signature over Printed Name</div>
+          <div class="pos">${esc(r.issued_by_position) || "PROPERTY OFFICER"}</div>
+          <div class="poscap">Position/Office</div>
+          <div class="date">&nbsp;</div>
+          <div class="poscap">Date</div>
+        </div>
+        <div class="col">
+          <div class="who">Received by:</div>
+          <div class="name">${esc(r.received_by_name) || "&nbsp;"}</div>
+          <div class="cap">Signature over Printed Name</div>
+          <div class="pos">${esc(r.received_by_position) || "&nbsp;"}</div>
+          <div class="poscap">Position/Office</div>
+          <div class="date">&nbsp;</div>
+          <div class="poscap">Date</div>
+        </div>
+      </div>
+    </div>`;
+}
+/** Renders the ITR (Inventory Transfer Report), matching the official Candoni form (Annex A.5) —
+ *  same Transfer Type checklist and three-signatory block as ptrHtml, plus the Entity Name/Fund
+ *  Cluster header and Item No./ICS No. columns specific to Semi-Expendable Property. */
+function itrHtml(r) {
+  const totalRows = 14;
+  const blankRows = Math.max(0, totalRows - 1);
+  const checked = t => r.transfer_type === t ? "☑" : "☐";
+  return `
+    <div class="form">
+      <div class="annex">Annex A.5</div>
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : ""}
+        <h1>MUNICIPAL GOVERNMENT OF CANDONI</h1>
+        <h2>INVENTORY TRANSFER REPORT</h2>
+      </div>
+      <div class="infoline"><b>Entity Name :</b><span class="val">${esc(r.entity_name)}</span></div>
+      <div class="headrow">
+        <div class="infoline" style="flex:1;margin-bottom:0;"><b>Fund Cluster :</b><span class="val">${esc(fundLabel(r.fund || "GF"))}</span></div>
+        <div style="text-align:right;"><b>ITR No.:</b><div class="num">${esc(r.number)}</div></div>
+      </div>
+      <div class="infoline"><b>From Accountable Officer/Agency/Fund Cluster :</b><span class="val">${esc(r.from_officer)}</span></div>
+      <div class="headrow">
+        <div class="infoline" style="flex:1;margin-bottom:0;"><b>To Accountable Officer/Agency/Fund Cluster :</b><span class="val">${esc(r.to_officer)}</span></div>
+        <div style="text-align:right;"><b>Date :</b><div class="num" style="font-size:12px;">${fmtDateShort(r.date)}</div></div>
+      </div>
+      <div style="margin:8px 0;font-size:11px;">
+        <b>Transfer Type:</b> (check only one) &nbsp;
+        ${checked("donation")} Donation &nbsp;&nbsp; ${checked("relocate")} Relocate &nbsp;&nbsp;
+        ${checked("reassignment")} Reassignment &nbsp;&nbsp; ${checked("others")} Others (Specify) ${r.transfer_type === "others" ? esc(r.transfer_type_other) : "_______________"}
+      </div>
+      <table class="pf">
+        <thead><tr><th style="width:11%">Date Acquired</th><th style="width:16%">Item No.</th><th style="width:14%">ICS No./Date</th><th style="width:32%">Description</th><th style="width:13%">Amount</th><th style="width:14%">Condition of Inventory</th></tr></thead>
+        <tbody>
+          <tr>
+            <td style="text-align:center;">${fmtDateShort(r.date_acquired)}</td>
+            <td class="mono" style="text-align:center;">${esc(r.property_no) || ""}</td>
+            <td class="mono" style="text-align:center;">${esc(r.sen) || ""}</td>
+            <td>${esc(r.description).replace(/\n/g, "<br>")}</td>
+            <td class="num">${fmtNum(r.amount)}</td>
+            <td style="text-align:center;">${esc(r.condition) || ""}</td>
+          </tr>
+          <tr class="nothing"><td colspan="6">***NOTHING FOLLOWS***</td></tr>
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
+        </tbody>
+      </table>
+      <div class="infoline" style="margin-top:8px;"><b>Reason for Transfer :</b><span class="val">${esc(r.reason)}</span></div>
+      <div class="sig">
+        <div class="col">
+          <div class="who">Approved by:</div>
+          <div class="name">${esc(r.approved_by_name) || "&nbsp;"}</div>
+          <div class="cap">Signature over Printed Name</div>
+          <div class="pos">${esc(r.approved_by_position) || "&nbsp;"}</div>
+          <div class="poscap">Position/Office</div>
+          <div class="date">&nbsp;</div>
+          <div class="poscap">Date</div>
+        </div>
+        <div class="col">
+          <div class="who">Released/Issued by:</div>
+          <div class="name">${esc(r.issued_by_name) || "&nbsp;"}</div>
+          <div class="cap">Signature over Printed Name</div>
+          <div class="pos">${esc(r.issued_by_position) || "PROPERTY OFFICER"}</div>
+          <div class="poscap">Position/Office</div>
+          <div class="date">&nbsp;</div>
+          <div class="poscap">Date</div>
+        </div>
+        <div class="col">
+          <div class="who">Received by:</div>
+          <div class="name">${esc(r.received_by_name) || "&nbsp;"}</div>
+          <div class="cap">Signature over Printed Name</div>
+          <div class="pos">${esc(r.received_by_position) || "&nbsp;"}</div>
+          <div class="poscap">Position/Office</div>
+          <div class="date">&nbsp;</div>
+          <div class="poscap">Date</div>
+        </div>
+      </div>
+      <div class="foot-note">Supply and/or Property Division/Unit</div>
+    </div>`;
+}
+function printPtr(id) {
+  const r = S.ptrItr.get(id);
+  if (!r) return;
+  openPrintWindow("Property Transfer Report", parIcsPrintHtml("PTR " + r.number, ptrHtml(r)));
+}
+function printItr(id) {
+  const r = S.ptrItr.get(id);
+  if (!r) return;
+  openPrintWindow("Inventory Transfer Report", parIcsPrintHtml("ITR " + r.number, itrHtml(r)));
+}
+
+/* ============================================================
    RENDER: Reports — the dedicated, discoverable home for generating the
    Equipment Ledger Card and Property Card (also reachable per-asset from
    the Asset Register / asset detail modal, and in bulk from the Register
@@ -3680,6 +4143,7 @@ function renderAll() {
   renderReports();
   renderCip();
   renderParIcs();
+  renderPtrItr();
 }
 function renderPeriodStatus() {
   const last = lastPostedPeriod(S.currentFund);
@@ -3695,6 +4159,7 @@ const VIEW_TITLES = {
   reports: ["Reports", "Generate the Equipment Ledger Card and Property Card for any item"],
   cip: ["Construction in Progress", "Track CIP projects and their billings, separate from the Asset Register, until each is completed and transferred to PPE"],
   parics: ["PAR / ICS", "Generate a Property Acknowledgment Receipt (PPE) or Inventory Custodian Slip (Semi-Expendable) — saved as a pending record until you record it into the Asset Register"],
+  ptritr: ["PTR / ITR", "Property Transfer Report (PPE) or Inventory Transfer Report (Semi-Expendable) — generated automatically whenever an item's location or accountable officer is transferred"],
 };
 /** Sets the topbar title/subtitle from the current view + fund. Called on both view changes and
  *  fund switches, since the subtitle always names which fund's books are showing. */
@@ -3785,4 +4250,5 @@ Object.assign(window, {
   openSxLedgerEntryModal, saveSxLedgerEntry,
   openParModal, openIcsModal, saveParIcs, deleteParIcs, printPar, printIcs, exportParIcsCsv,
   recordParIcsChoice, recordParIcsAsNew, openMatchParIcsModal, matchParIcsToExisting, unrecordParIcs,
+  printPtr, printItr, exportPtrItrCsv, openEditPtrItrModal, savePtrItrEdit,
 });
