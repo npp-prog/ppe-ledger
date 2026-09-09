@@ -18,12 +18,16 @@ import {
   onSnapshot as fsOnSnapshot,
   setDoc, updateDoc, deleteDoc, addDoc, getDoc,
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore.js";
+import {
+  getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject,
+} from "https://www.gstatic.com/firebasejs/10.13.2/firebase-storage.js";
 
 import { firebaseConfig } from "./firebase-config.js";
 
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 const firestore = getFirestore(app);
+const storage = getStorage(app);
 
 // ---- Auth helpers ----
 export function watchAuthState(callback) {
@@ -77,6 +81,25 @@ export const db = {
   collection: (path) => wrapCollectionRef(fsCollection(firestore, path)),
   doc: (path) => wrapDocRef(fsDoc(firestore, path)),
 };
+
+// ---- Firebase Storage helpers (asset photos, scanned documents such as the PAR) ----
+// Requires the project to be on the Blaze (pay-as-you-go) billing plan — Storage isn't
+// available on the free Spark plan the way Firestore/Auth are. See README.md for the
+// one-time setup step. Every path lives under a fixed prefix so storage.rules can scope
+// access with a single rule, mirroring firestore.rules.
+/** Uploads `file` to `path` in the default bucket and returns its public download URL. */
+export async function uploadFile(path, file) {
+  const ref = sRef(storage, path);
+  await uploadBytes(ref, file);
+  const url = await getDownloadURL(ref);
+  return { url, path };
+}
+/** Deletes a previously-uploaded file, if it still exists — safe to call on a path that's
+ *  already gone (e.g. replaced by a newer upload) since "not found" is swallowed. */
+export async function deleteFile(path) {
+  if (!path) return;
+  try { await deleteObject(sRef(storage, path)); } catch (e) { /* already gone — fine */ }
+}
 
 // ---- Plain browser download (replaces the Claude "downloads" capability) ----
 export function browserDownload(filename, content, mime) {
