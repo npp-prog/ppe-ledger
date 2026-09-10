@@ -11,7 +11,9 @@ const ACCOUNT_CATALOG = [
   ["Land & Land Improvements", 10701010, "Land", false, null, null],
   ["Land & Land Improvements", 10702010, "Land Improvements, Aquaculture Structures", true, 50501020, "Depreciation - Land Improvements"],
   ["Land & Land Improvements", 10702990, "Other Land Improvements", true, 50501020, "Depreciation - Land Improvements"],
-  ["Local Road Network", 10703010, "Road Networks", true, 50501030, "Depreciation - Infrastructure Assets"],
+  // Road Networks (10703010) stays grouped under Infrastructure Assets, per the client's explicit
+  // instruction (Sept 2026) — do not split it into its own optgroup.
+  ["Infrastructure Assets", 10703010, "Road Networks", true, 50501030, "Depreciation - Infrastructure Assets"],
   ["Infrastructure Assets", 10703020, "Flood Control Systems", true, 50501030, "Depreciation - Infrastructure Assets"],
   ["Infrastructure Assets", 10703030, "Sewer Systems", true, 50501030, "Depreciation - Infrastructure Assets"],
   ["Infrastructure Assets", 10703040, "Water Supply Systems", true, 50501030, "Depreciation - Infrastructure Assets"],
@@ -30,7 +32,9 @@ const ACCOUNT_CATALOG = [
   ["Buildings & Structures", 10704990, "Other Structures", true, 50501040, "Depreciation - Buildings and Other Structures"],
   ["Machinery & Equipment", 10705010, "Machinery", true, 50501050, "Depreciation - Machinery and Equipment"],
   ["Machinery & Equipment", 10705020, "Office Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
-  ["Information & Communication Technology Equipment", 10705030, "Information and Communication Technology Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
+  // ICT Equipment (10705030) stays grouped under Machinery & Equipment, per the client's explicit
+  // instruction (Sept 2026) — do not split it into its own optgroup.
+  ["Machinery & Equipment", 10705030, "Information and Communication Technology Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
   ["Machinery & Equipment", 10705040, "Agricultural and Forestry Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
   ["Machinery & Equipment", 10705050, "Marine and Fishery Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
   ["Machinery & Equipment", 10705060, "Airport Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
