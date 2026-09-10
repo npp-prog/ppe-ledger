@@ -184,6 +184,7 @@
   tbody td{ padding:9px 14px; border-bottom:1px solid var(--line-soft); vertical-align:top; }
   tbody tr:hover{ background:var(--line-soft); }
   tbody tr.clickable{ cursor:pointer; }
+  tbody tr.report-row{ cursor:pointer; } /* Reports tab rows (item 12) — kept distinct from .clickable so it never collides with a same-text row that Register/Retired might also be showing for the same asset in the always-mounted DOM. */
   td.num, th.num{ text-align:right; }
   .subtle{ color:var(--ink-soft); }
   .truncate{ max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
