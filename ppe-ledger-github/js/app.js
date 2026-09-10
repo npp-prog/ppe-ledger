@@ -11,7 +11,7 @@ const ACCOUNT_CATALOG = [
   ["Land & Land Improvements", 10701010, "Land", false, null, null],
   ["Land & Land Improvements", 10702010, "Land Improvements, Aquaculture Structures", true, 50501020, "Depreciation - Land Improvements"],
   ["Land & Land Improvements", 10702990, "Other Land Improvements", true, 50501020, "Depreciation - Land Improvements"],
-  ["Infrastructure Assets", 10703010, "Road Networks", true, 50501030, "Depreciation - Infrastructure Assets"],
+  ["Local Road Network", 10703010, "Road Networks", true, 50501030, "Depreciation - Infrastructure Assets"],
   ["Infrastructure Assets", 10703020, "Flood Control Systems", true, 50501030, "Depreciation - Infrastructure Assets"],
   ["Infrastructure Assets", 10703030, "Sewer Systems", true, 50501030, "Depreciation - Infrastructure Assets"],
   ["Infrastructure Assets", 10703040, "Water Supply Systems", true, 50501030, "Depreciation - Infrastructure Assets"],
@@ -30,7 +30,7 @@ const ACCOUNT_CATALOG = [
   ["Buildings & Structures", 10704990, "Other Structures", true, 50501040, "Depreciation - Buildings and Other Structures"],
   ["Machinery & Equipment", 10705010, "Machinery", true, 50501050, "Depreciation - Machinery and Equipment"],
   ["Machinery & Equipment", 10705020, "Office Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
-  ["Machinery & Equipment", 10705030, "Information and Communication Technology Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
+  ["Information & Communication Technology Equipment", 10705030, "Information and Communication Technology Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
   ["Machinery & Equipment", 10705040, "Agricultural and Forestry Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
   ["Machinery & Equipment", 10705050, "Marine and Fishery Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
   ["Machinery & Equipment", 10705060, "Airport Equipment", true, 50501050, "Depreciation - Machinery and Equipment"],
@@ -69,6 +69,91 @@ ACCOUNT_CATALOG.forEach(([group, code, name, dep, expCode, expName]) => {
  *  total still counts toward these accounts' cost in Reconciliation until it's capitalized. */
 const CIP_ACCOUNT_CODES = ACCOUNT_CATALOG.filter(([g]) => g === "Construction in Progress").map(([, code]) => code);
 function isCipAccount(code) { return CIP_ACCOUNT_CODES.includes(Number(code)); }
+
+/* ---------- Dedicated Property/Ledger Card forms (2026-09) ----------
+ * 5 account groups each print their own official COA form (see ledgerCardHtmlFor/
+ * propertyCardHtmlFor) instead of the generic Equipment Ledger Card / Property Card — Biological
+ * Assets (Appendix 55), Land & Land Improvements (Appendix 12 / Annex 56), Local Road Network
+ * (Appendix 13 / 57) split out of Infrastructure Assets, Other Public Infrastructure (Appendix 14
+ * / 58, the rest of Infrastructure Assets), and Buildings & Structures (Appendix 15 / 59). Each
+ * needs a few extra header fields the generic Add/Edit form doesn't otherwise collect (Lot ID No.,
+ * Floor Area, Road Length, etc.) — specialCardGroupFor() decides which set applies to a given PPE
+ * account code, specialCardFieldsHtml()/readSpecialCardFieldsFromForm() render and read them. */
+const LAND_ACCOUNT_CODES = [10701010, 10702010, 10702990];
+const ROAD_ACCOUNT_CODES = [10703010];
+const OTHER_INFRA_ACCOUNT_CODES = [10703020, 10703030, 10703040, 10703050, 10703060, 10703070, 10703080, 10703090, 10703990];
+const BUILDINGS_ACCOUNT_CODES = [10704010, 10704020, 10704030, 10704040, 10704050, 10704060, 10704990];
+const BIOLOGICAL_ACCOUNT_CODES = [10801010, 10801020, 10801030, 10801990];
+function specialCardGroupFor(code) {
+  code = Number(code);
+  if (LAND_ACCOUNT_CODES.includes(code)) return "land";
+  if (ROAD_ACCOUNT_CODES.includes(code)) return "road";
+  if (OTHER_INFRA_ACCOUNT_CODES.includes(code)) return "otherinfra";
+  if (BUILDINGS_ACCOUNT_CODES.includes(code)) return "buildings";
+  if (BIOLOGICAL_ACCOUNT_CODES.includes(code)) return "biological";
+  return null;
+}
+function specialCardFieldsHtml(group, a) {
+  const v = k => esc(a ? (a[k] || "") : "");
+  if (group === "biological") return `
+    <div class="field"><label>Head count / Qty<br><span class="subtle" style="font-size:11px;font-weight:400;">Used on the printed Biological Assets Property Card's Additions/Reductions/Balance columns.</span></label>
+      <input type="number" step="1" min="1" id="f_sp_bioqty" value="${a && a.bio_qty ? a.bio_qty : 1}"></div>`;
+  if (group === "land") return `
+    <div class="fieldrow">
+      <div class="field"><label>Lot ID No.</label><input id="f_sp_lotid" value="${v("land_lot_id")}"></div>
+      <div class="field"><label>Classification</label><input id="f_sp_classification" value="${v("land_classification")}"></div>
+    </div>
+    <div class="fieldrow">
+      <div class="field"><label>Area</label><input id="f_sp_area" value="${v("land_area")}" placeholder="e.g. 1,200 sq.m."></div>
+      <div class="field"><label>Technical description</label><input id="f_sp_techdesc" value="${v("land_technical_desc")}"></div>
+    </div>`;
+  if (group === "road") return `
+    <div class="fieldrow">
+      <div class="field"><label>Road Network ID No.</label><input id="f_sp_roadid" value="${v("road_id_no")}"></div>
+      <div class="field"><label>Type of road</label><input id="f_sp_roadtype" value="${v("road_type")}" placeholder="PCCP / Asphalt / Gravel"></div>
+    </div>
+    <div class="fieldrow3">
+      <div class="field"><label>Length</label><input id="f_sp_length" value="${v("road_length")}"></div>
+      <div class="field"><label>Width</label><input id="f_sp_width" value="${v("road_width")}"></div>
+      <div class="field"><label>Thickness (pavement)</label><input id="f_sp_thickness" value="${v("road_thickness")}"></div>
+    </div>`;
+  if (group === "otherinfra") return `
+    <div class="fieldrow">
+      <div class="field"><label>Public Infrastructure ID No.</label><input id="f_sp_infraid" value="${v("infra_id_no")}"></div>
+      <div class="field"><label>Type</label><input id="f_sp_infratype" value="${v("infra_type")}"></div>
+    </div>
+    <div class="field"><label>Other detailed description</label><input id="f_sp_infraother" value="${v("infra_other_desc")}"></div>`;
+  if (group === "buildings") return `
+    <div class="fieldrow">
+      <div class="field"><label>Building/Structure ID No.</label><input id="f_sp_bldgid" value="${v("bldg_id_no")}"></div>
+      <div class="field"><label>Type/Made (concrete, wood)</label><input id="f_sp_bldgtype" value="${v("bldg_type_made")}"></div>
+    </div>
+    <div class="fieldrow">
+      <div class="field"><label>Floor area</label><input id="f_sp_floorarea" value="${v("bldg_floor_area")}"></div>
+      <div class="field"><label>No. of floors</label><input id="f_sp_nfloors" value="${v("bldg_no_of_floors")}"></div>
+    </div>`;
+  return "";
+}
+function readSpecialCardFieldsFromForm(group) {
+  const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
+  if (group === "biological") return { bio_qty: Number(val("f_sp_bioqty")) || 1 };
+  if (group === "land") return {
+    land_lot_id: val("f_sp_lotid"), land_classification: val("f_sp_classification"),
+    land_area: val("f_sp_area"), land_technical_desc: val("f_sp_techdesc"),
+  };
+  if (group === "road") return {
+    road_id_no: val("f_sp_roadid"), road_type: val("f_sp_roadtype"),
+    road_length: val("f_sp_length"), road_width: val("f_sp_width"), road_thickness: val("f_sp_thickness"),
+  };
+  if (group === "otherinfra") return {
+    infra_id_no: val("f_sp_infraid"), infra_type: val("f_sp_infratype"), infra_other_desc: val("f_sp_infraother"),
+  };
+  if (group === "buildings") return {
+    bldg_id_no: val("f_sp_bldgid"), bldg_type_made: val("f_sp_bldgtype"),
+    bldg_floor_area: val("f_sp_floorarea"), bldg_no_of_floors: val("f_sp_nfloors"),
+  };
+  return {};
+}
 
 /** Acquisition types an Asset Register / CIP-transfer entry can record, beyond a normal
  *  purchase — request was "not only acquired item but also found at the station and donated
@@ -400,28 +485,46 @@ function cipStatusLabel(status) {
  *  are deliberately excluded here — there's no code to reconcile against, and including them used
  *  to add a bogus "null" row to the Reconciliation table. Their cost still counts in Dashboard/
  *  Register/Reports totals; they're just outside what Reconciliation can check. */
-function distinctCostAccounts(fund) {
+/** Which account code an asset's cost belongs to as of a given YYYY-MM period — walks its
+ *  `account_changes` history (see transferAsset's "change account on transfer" option, item 10)
+ *  and applies only the changes effective at or before that period, so an account-code change
+ *  made mid-life only moves the asset's cost into its new account from that period forward —
+ *  Reconciliation for already-posted past periods keeps showing it under the old account, exactly
+ *  matching what a Trial Balance from before the change would have shown. Falls back to the
+ *  asset's current account_code when it has no recorded account_changes at all (the common case). */
+function accountCodeAsOf(asset, period) {
+  const changes = asset && asset.account_changes;
+  if (!changes || !changes.length) return asset ? asset.account_code : null;
+  const sorted = [...changes].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  let code = sorted[0].old_code;
+  sorted.forEach(c => { if ((c.date || "").slice(0, 7) <= period) code = c.new_code; });
+  return code;
+}
+function distinctCostAccounts(fund, period) {
   const map = new Map();
-  activeAssets(fund).forEach(a => { if (a.account_code && !map.has(a.account_code)) map.set(a.account_code, a.account_name); });
+  activeAssets(fund).forEach(a => {
+    const code = period ? accountCodeAsOf(a, period) : a.account_code;
+    if (code && !map.has(code)) map.set(code, accountInfo(code).name);
+  });
   activeCipProjects(fund).forEach(p => { if (p.account_code && !map.has(p.account_code)) map.set(p.account_code, p.account_name); });
   return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([code, name]) => ({ code, name }));
 }
-function registryCostFor(code, fund) {
-  const assetCost = round2(activeAssets(fund).filter(a => a.account_code === code).reduce((s, a) => s + (a.cost || 0), 0));
+function registryCostFor(code, fund, period) {
+  const assetCost = round2(activeAssets(fund).filter(a => (period ? accountCodeAsOf(a, period) : a.account_code) === code).reduce((s, a) => s + (a.cost || 0), 0));
   const cipCost = round2(activeCipProjects(fund).filter(p => p.account_code === code).reduce((s, p) => s + cipProjectTotal(p), 0));
   return round2(assetCost + cipCost);
 }
 function registryADFor(code, period, fund) {
-  return round2(activeAssets(fund).filter(a => a.account_code === code && a.depreciable)
+  return round2(activeAssets(fund).filter(a => accountCodeAsOf(a, period) === code && a.depreciable)
     .reduce((s, a) => s + accumDeprAsOf(a, period), 0));
 }
 /** Build the full variance table for a chosen fund+period against that fund's tb_snapshot doc (or null). */
 function computeReconciliation(fund, period) {
   const tb = getTbSnapshot(fund, period);
   const accounts = tb ? tb.accounts : null;
-  return distinctCostAccounts(fund).map(({ code, name }) => {
+  return distinctCostAccounts(fund, period).map(({ code, name }) => {
     const adCode = code + 1;
-    const regCost = registryCostFor(code, fund);
+    const regCost = registryCostFor(code, fund, period);
     const regAD = registryADFor(code, period, fund);
     const tbCost = accounts && accounts[code] ? Number(accounts[code].debit || 0) : null;
     const tbAD = accounts && accounts[adCode] ? Number(accounts[adCode].credit || 0) : null;
@@ -453,7 +556,7 @@ function costReconciliationStatus(fund, period) {
   // Excludes Semi-Expendable cost accounts — this gate exists to protect PPE depreciation
   // posting specifically, and Semi-Expendable has no posting workflow of its own to protect, so
   // an unrelated Semi-Expendable inventory-account variance shouldn't block PPE depreciation.
-  const rows = computeReconciliation(fund, requiredPeriod).filter(r => distinctCostAccounts(fund).some(c => c.code === r.code) && !isSxAccount(r.code));
+  const rows = computeReconciliation(fund, requiredPeriod).filter(r => distinctCostAccounts(fund, requiredPeriod).some(c => c.code === r.code) && !isSxAccount(r.code));
   const flagged = rows.filter(r => r.tbCost == null || Math.abs(r.varCost) >= 1);
   return { ok: flagged.length === 0, reason: flagged.length ? "variance" : null, tbPeriod: requiredPeriod, requiredPeriod, flagged };
 }
@@ -496,7 +599,7 @@ function initDb() {
   try {
     S.db = db;
     db.collection("assets").onSnapshot(
-      snap => { S.assets.clear(); snap.docs.forEach(d => S.assets.set(d.id, { id: d.id, ...d.data() })); S.ready = true; setSync(true); renderAll(); },
+      snap => { S.assets.clear(); snap.docs.forEach(d => S.assets.set(d.id, { id: d.id, ...d.data() })); S.ready = true; setSync(true); renderAll(); relabelMisassignedSxAccounts(); },
       err => { console.error(err); setSync(false, "Connection issue — showing last known data."); }
     );
     db.collection("postings").onSnapshot(
@@ -854,6 +957,7 @@ function openAssetModal(existingId, initialType, prefill) {
       <div id="f_block_ppe_account">
         <div class="field"><label>Account / Category</label>
           <select id="f_account">${assetCategoryOptions(a && itemType === "ppe" ? a.account_code : null)}</select></div>
+        <div id="f_block_special">${itemType === "ppe" ? specialCardFieldsHtml(specialCardGroupFor(a ? a.account_code : null), a) : ""}</div>
       </div>
       <div id="f_block_sx_account" style="display:none;">
         <div class="fieldrow">
@@ -949,10 +1053,15 @@ function openAssetModal(existingId, initialType, prefill) {
     document.getElementById("f_baselinead_wrap").style.display = info.depreciable ? "" : "none";
   };
   ["f_cost", "f_residual", "f_life", "f_account"].forEach(id => document.getElementById(id).addEventListener("input", updatePreview));
+  const updateSpecialFields = () => {
+    const code = Number(document.getElementById("f_account").value);
+    document.getElementById("f_block_special").innerHTML = specialCardFieldsHtml(specialCardGroupFor(code), a);
+  };
   document.getElementById("f_account").addEventListener("change", () => {
     const cost = document.getElementById("f_cost").value;
     if (!document.getElementById("f_residual").value && cost) document.getElementById("f_residual").value = round2(Number(cost) * 0.05);
     updatePreview();
+    updateSpecialFields();
   });
   updatePreview();
   const updateSxPreview = () => {
@@ -1021,6 +1130,7 @@ async function saveAsset(existingId) {
       updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     };
     if (linkParIcsRecord) { rec.source_par_ics_id = linkParIcsId; rec.source_par_ics_no = linkParIcsRecord.number; }
+    Object.assign(rec, readSpecialCardFieldsFromForm(specialCardGroupFor(code)));
   } else {
     const accountVal = document.getElementById("f_sx_account").value;
     const accountCode = accountVal ? Number(accountVal) : null;
@@ -1421,6 +1531,12 @@ function openTransferModal(id) {
           <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;"><input type="radio" name="tr_type" value="others"> Others</label>
           <input id="tr_type_other" style="flex:1;min-width:160px;" placeholder="Specify" disabled>
         </div>
+        <div style="margin-top:4px;"><label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;font-size:12.5px;"><input type="checkbox" id="tr_reclassify"> Also change this item's Account Code / Name</label></div>
+        <div id="tr_reclassify_field" class="field" style="display:none;margin-top:6px;">
+          <label>New account code</label>
+          <select id="tr_account">${isSx ? sxAccountCategoryOptions(a.account_code) : assetCategoryOptions(a.account_code)}</select>
+          <p class="subtle" style="font-size:11.5px;margin:4px 0 0;">Reconciliation keeps showing this item under its current account for periods already posted before the effective date above — only this period and later use the new account.</p>
+        </div>
       </div>
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
       <p class="subtle" style="font-size:12px;margin-top:0;">Signatories for the printed ${label} (optional — can also be filled in later from Edit)</p>
@@ -1451,6 +1567,9 @@ function openTransferModal(id) {
     otherInput.disabled = !isOthers;
     if (!isOthers) otherInput.value = "";
   }));
+  document.getElementById("tr_reclassify").addEventListener("change", e => {
+    document.getElementById("tr_reclassify_field").style.display = e.target.checked ? "" : "none";
+  });
 }
 
 async function transferAsset(id) {
@@ -1465,8 +1584,12 @@ async function transferAsset(id) {
   const newOfficer = document.getElementById("tr_officer").value.trim();
   const date = document.getElementById("tr_date").value || new Date().toISOString().slice(0, 10);
   const reason = document.getElementById("tr_reason").value.trim();
-  if (!newLocation && !newOfficer) return toast("Enter a new location or accountable officer.");
-  if (newLocation === (a.location || "") && newOfficer === (a.accountable_officer || "")) return toast("No change to save.");
+  const reclassify = document.getElementById("tr_reclassify").checked;
+  const newAccountCode = reclassify ? Number(document.getElementById("tr_account").value) : null;
+  const isReclassifying = reclassify && newAccountCode && newAccountCode !== a.account_code;
+  if (!newLocation && !newOfficer && !isReclassifying) return toast("Enter a new location or accountable officer, or check “Also change this item’s Account Code / Name” and pick a new account.");
+  if (newLocation === (a.location || "") && newOfficer === (a.accountable_officer || "") && !isReclassifying) return toast("No change to save.");
+  if (reclassify && !newAccountCode) return toast("Pick the new account code, or uncheck “Also change this item’s Account Code / Name”.");
   const enteredNumber = document.getElementById("tr_number").value.trim();
   const number = enteredNumber || (isSx ? nextItrNumber(fund, date) : nextPtrNumber(fund, date));
   if (ptrItrNumberTaken(fund, docType, number)) return toast(`${docType.toUpperCase()} No. ${number} is already used by another ${docType.toUpperCase()} in this fund.`);
@@ -1484,6 +1607,18 @@ async function transferAsset(id) {
     reason, by: viewerLabel(), at: new Date().toISOString(),
   };
   const transfers = [...(a.transfers || []), entry];
+  // Item 10: optionally reclassify the item's Account Code/Name as part of the transfer. Recorded
+  // as its own dated history entry (account_changes, mirroring the transfers[] pattern above) so
+  // accountCodeAsOf() can tell Reconciliation which account applied in any given past period —
+  // the effective date is this transfer's date, so periods before it keep showing the old account.
+  const accountChangeEntry = isReclassifying ? {
+    date, old_code: a.account_code, old_name: a.account_name,
+    new_code: newAccountCode, new_name: accountInfo(newAccountCode).name,
+    by: viewerLabel(), at: new Date().toISOString(),
+  } : null;
+  const reasonForPrint = accountChangeEntry
+    ? [reason, `Account reclassified to ${accountChangeEntry.new_code} — ${accountChangeEntry.new_name}.`].filter(Boolean).join(" ")
+    : reason;
   const ptrItrRec = {
     doc_type: docType, fund, number, date, asset_id: id, transfer_entry_id: entryId,
     property_no: a.property_id || "", sen: a.sen || "", date_acquired: a.date_acquired || "",
@@ -1492,19 +1627,45 @@ async function transferAsset(id) {
     transfer_type: transferType, transfer_type_other: transferType === "others" ? transferTypeOther : "",
     from_location: entry.old_location, to_location: entry.new_location,
     from_officer: entry.old_accountable_officer, to_officer: entry.new_accountable_officer,
-    reason,
+    reason: reasonForPrint,
     approved_by_name: approvedName, approved_by_position: approvedPos,
     issued_by_name: issuedName, issued_by_position: issuedPos || "PROPERTY OFFICER",
     received_by_name: entry.new_accountable_officer, received_by_position: "",
     created_by: viewerLabel(), created_at: new Date().toISOString(),
   };
-  try {
-    await S.db.collection("assets").doc(id).update({
-      location: entry.new_location, accountable_officer: entry.new_accountable_officer, transfers,
-      updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+  // A Donation transfer still generates its PTR/ITR like any other transfer, but the item is also
+  // no longer in the municipality's custody once it's donated out — so it moves straight to
+  // Retired Assets in the same write, with reason "Donated out" (already one of RETIRE_REASONS)
+  // and a detail built from what was entered above, referencing the PTR/ITR number that documents
+  // the donation.
+  const isDonation = transferType === "donation";
+  const assetUpdate = {
+    location: entry.new_location, accountable_officer: entry.new_accountable_officer, transfers,
+    updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+  };
+  if (accountChangeEntry) {
+    const newInfo = accountInfo(newAccountCode);
+    Object.assign(assetUpdate, {
+      account_code: accountChangeEntry.new_code, account_name: accountChangeEntry.new_name,
+      ad_account_code: newAccountCode + 1, dep_exp_account_code: newInfo.expCode, dep_exp_account_name: newInfo.expName,
+      account_changes: [...(a.account_changes || []), accountChangeEntry],
     });
+  }
+  if (isDonation) {
+    Object.assign(assetUpdate, {
+      status: "retired", retired_at: date + "T00:00:00.000Z", retired_by: viewerLabel(),
+      retire_reason: "Donated out",
+      retire_detail: reason || `Donated via ${docType.toUpperCase()} ${number}${entry.new_location ? " to " + entry.new_location : ""}.`,
+      retire_reference: number,
+    });
+  }
+  try {
+    await S.db.collection("assets").doc(id).update(assetUpdate);
     await S.db.collection("ptr_itr").add(ptrItrRec);
-    toast(`Transfer saved — ${docType.toUpperCase()} ${number} generated.`);
+    const reclassNote = accountChangeEntry ? ` Account reclassified to ${accountChangeEntry.new_code} — ${accountChangeEntry.new_name}, effective this period.` : "";
+    toast((isDonation
+      ? `Transfer saved — ${docType.toUpperCase()} ${number} generated, and the item was retired (Donated out).`
+      : `Transfer saved — ${docType.toUpperCase()} ${number} generated.`) + reclassNote);
     closeModal();
   } catch (e) { console.error(e); toast("Couldn't save — try again."); }
 }
@@ -3223,6 +3384,315 @@ function propertyCardCardHtml(asset) {
       </table>
     </div>`;
 }
+
+/* ---------- Dedicated forms for Biological Assets / Land & Land Improvements / Local Road
+ * Network / Other Public Infrastructure / Buildings & Structures (2026-09) ----------
+ * These 5 groups (see specialCardGroupFor() above) print their own official COA form instead of
+ * the generic Equipment Ledger Card / Property Card — see ledgerCardHtmlFor/propertyCardHtmlFor's
+ * dispatch below. */
+
+/** Biological Assets Property Card (Appendix 55) — the one COA form in this batch that's a
+ *  quantity roll-forward (Additions/Reductions/Balance) with a Fair Value column, rather than a
+ *  cost/depreciation ledger, since biological assets are never depreciated. Built from the same
+ *  assetEventTimeline() used everywhere else: an acquisition is a Purchase addition, a revaluation
+ *  re-states Fair Value, and a retirement becomes a reduction — bucketed into the form's Sale /
+ *  Transfer / Death / Others reduction columns by matching keywords in the retirement reason,
+ *  since the app doesn't collect a separate numeric selling price at retirement (left blank for
+ *  the office to fill in by hand, same as this form's other manual columns). */
+function bioAssetPropertyCardHtml(asset) {
+  const qty = asset.bio_qty || 1;
+  const rows = assetEventTimeline(asset);
+  const blankRows = Math.max(0, 12 - rows.length);
+  let runningQty = 0;
+  const dataRows = rows.map(r => {
+    let purchase = "", birth = "", othersAdd = "", sale = "", sellingPrice = "", transfer = "", death = "", othersRed = "", remarks = "";
+    if (r.kind === "acquire") { purchase = qty; runningQty += qty; }
+    else if (r.kind === "retire") {
+      const reason = (asset.retire_reason || "").toLowerCase();
+      if (reason.includes("sale")) { sale = runningQty; }
+      else if (reason.includes("transferred")) { transfer = runningQty; }
+      else if (reason.includes("donat")) { othersRed = runningQty; remarks = "Donated out"; }
+      else { death = reason.includes("lost") || reason.includes("stolen") || reason.includes("worn") ? "" : runningQty; othersRed = death ? "" : runningQty; }
+      runningQty = 0;
+    }
+    const fairValue = r.kind === "acquire" || r.kind === "revalue" ? r.cost : "";
+    return `<tr>
+      <td>${fmtDateShort(r.date)}</td><td>${esc(r.reference)}</td>
+      <td class="num">${purchase}</td><td class="num">${birth}</td><td class="num">${othersAdd}</td>
+      <td class="num">${sale}</td><td class="num">${sellingPrice}</td><td class="num">${transfer}</td><td class="num">${death}</td><td class="num">${othersRed}</td>
+      <td class="num">${fairValue === "" ? "" : fmtNum(fairValue)}</td>
+      <td class="num">${runningQty}</td><td class="num">${fmtNum(r.adjustedCost != null ? (r.kind === "retire" ? 0 : r.cost) : 0)}</td>
+      <td>${esc(remarks)}</td>
+    </tr>`;
+  }).join("");
+  return `
+    <div class="card">
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : `<div style="width:56px;"></div>`}
+        <div class="titles"><h1>BIOLOGICAL ASSETS PROPERTY CARD</h1></div>
+        <div class="fund">Fund:<br><b>${esc(fundLabel(asset.fund || "GF"))}</b></div>
+      </div>
+      <table class="info">
+        <tr><td class="label">Biological Asset:</td><td>${esc(asset.account_name)}</td></tr>
+        <tr><td class="label">Description:</td><td>${esc(asset.description) || "—"}</td></tr>
+      </table>
+      <table class="data">
+        <thead><tr>
+          <th rowspan="2" style="width:7%">Date</th><th rowspan="2" style="width:9%">Reference</th>
+          <th colspan="3">Additions</th><th colspan="5">Reductions</th>
+          <th rowspan="2" style="width:8%">Fair Value</th><th colspan="2">Balance</th><th rowspan="2" style="width:9%">Remarks</th>
+        </tr>
+        <tr>
+          <th style="width:6%">Purchase<br>Qty.</th><th style="width:6%">Birth<br>Qty.</th><th style="width:6%">Others<br>Qty.</th>
+          <th style="width:6%">Sale<br>Qty.</th><th style="width:7%">Selling<br>Price</th><th style="width:6%">Transfer<br>Qty.</th><th style="width:6%">Death<br>Qty.</th><th style="width:6%">Others<br>Qty.</th>
+          <th style="width:6%">Qty.</th><th style="width:8%">Amount</th>
+        </tr></thead>
+        <tbody>
+          ${dataRows}
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank">${"<td></td>".repeat(14)}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+/** Shared "component-sectioned" table used by Local Road Network, Other Public Infrastructure and
+ *  Buildings & Structures — both the Ledger Card (Appendix 13/14/15, with Accumulated
+ *  Depreciation / Accumulated Impairment Loss / Carrying Amount) and Property Card (Appendix
+ *  57/58/59, with just Adjustment/s / Adjusted Cost) variants share this shape. The official forms
+ *  break each asset into named sub-components (e.g. a road's "A. Road Lot" / "B. Pavement" / ...)
+ *  with their own cost lines — this app tracks one cost/history per asset, not per component, so
+ *  the asset's own acquisition/revaluation/depreciation/retirement history prints under the first
+ *  ("primary") component and the remaining components print as blank, pre-labeled rows ready for
+ *  the office to fill in by hand, exactly like the blank rows on every other card in this app. */
+function componentSectionedCardHtml(asset, opts) {
+  const isLedger = opts.variant === "ledger";
+  const colCount = isLedger ? 12 : 9;
+  // The Property Card variant has no depreciation column, so — like the generic Property Card —
+  // it only shows receipt/disposal-style events, skipping the per-period depreciation postings
+  // that only matter to the Ledger Card.
+  const timeline = isLedger ? assetEventTimeline(asset)
+    : assetEventTimeline(asset).filter(r => r.kind === "acquire" || r.kind === "retire" || r.kind === "revalue" || r.kind === "transfer");
+  const dataRowHtml = (r, i) => isLedger ? `<tr>
+      <td></td>
+      <td class="num">${i === 0 && asset.useful_life_years ? asset.useful_life_years + " yrs" : ""}</td>
+      <td>${fmtDateShort(r.date)}</td><td>${esc(r.reference)}</td>
+      <td>${i === 0 ? esc(asset.description) : esc(r.label)}</td>
+      <td class="num">${i === 0 ? fmtNum(r.cost) : (r.kind === "revalue" ? fmtNum(r.cost) : "")}</td>
+      <td class="num">${asset.depreciable ? fmtNum(r.accumDepr) : ""}</td>
+      <td class="num"></td><td class="num"></td>
+      <td class="num">${fmtNum(r.adjustedCost)}</td>
+      <td></td><td class="num"></td>
+    </tr>` : `<tr>
+      <td></td>
+      <td>${fmtDateShort(r.date)}</td><td>${esc(r.reference)}</td>
+      <td>${i === 0 ? esc(asset.description) : esc(r.label)}</td>
+      <td class="num">${i === 0 ? fmtNum(r.cost) : (r.kind === "revalue" ? fmtNum(r.cost) : "")}</td>
+      <td class="num"></td>
+      <td class="num">${fmtNum(r.adjustedCost)}</td>
+      <td></td><td class="num"></td>
+    </tr>`;
+  const sectionHtml = (label, blankCount, dataHtml) => `
+    <tr><td colspan="${colCount}" style="font-weight:bold;background:#eee;">${esc(label)}</td></tr>
+    ${dataHtml || ""}
+    ${Array.from({ length: blankCount }).map(() => `<tr class="blank">${"<td></td>".repeat(colCount)}</tr>`).join("")}`;
+  const primaryData = timeline.map((r, i) => dataRowHtml(r, i)).join("");
+  const sections = [sectionHtml(opts.components[0], Math.max(2, 5 - timeline.length), primaryData)]
+    .concat(opts.components.slice(1).map(label => sectionHtml(label, 5)));
+  const theadCols = isLedger
+    ? `<tr>
+        <th rowspan="2" style="width:11%">Components</th><th rowspan="2" style="width:7%">Estimated<br>Useful Life</th>
+        <th rowspan="2" style="width:7%">Date</th><th rowspan="2" style="width:9%">Reference</th>
+        <th rowspan="2" style="width:15%">Description</th><th rowspan="2" style="width:8%">Cost</th>
+        <th rowspan="2" style="width:8%">Accumulated<br>Depreciation</th><th rowspan="2" style="width:8%">Accumulated<br>Impairment Loss</th>
+        <th rowspan="2" style="width:7%">Adjustment/s</th><th rowspan="2" style="width:8%">Carrying<br>Amount</th>
+        <th colspan="2">Maintenance History</th>
+      </tr>
+      <tr><th style="width:8%">Nature of Maintenance</th><th style="width:6%">Amount</th></tr>`
+    : `<tr>
+        <th rowspan="2" style="width:13%">Components</th>
+        <th rowspan="2" style="width:8%">Date</th><th rowspan="2" style="width:10%">Reference</th>
+        <th rowspan="2" style="width:18%">Description</th><th rowspan="2" style="width:9%">Cost</th>
+        <th rowspan="2" style="width:9%">Adjustment/s</th><th rowspan="2" style="width:9%">Adjusted<br>Cost</th>
+        <th colspan="2">Maintenance History</th>
+      </tr>
+      <tr><th style="width:9%">Nature of Maintenance</th><th style="width:7%">Amount</th></tr>`;
+  return `
+    <div class="card">
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : `<div style="width:56px;"></div>`}
+        <div class="titles"><h1>${esc(opts.title)}</h1></div>
+        <div class="fund">Fund:<br><b>${esc(fundLabel(asset.fund || "GF"))}</b></div>
+      </div>
+      <table class="info">${opts.headerRows}</table>
+      <table class="data">
+        <thead>${theadCols}</thead>
+        <tbody>${sections.join("")}</tbody>
+      </table>
+    </div>`;
+}
+function landHeaderRows(asset, withAccount) {
+  return `
+    ${withAccount ? `<tr><td class="label">Account:</td><td>${formatAccountCode(asset.account_code)} — ${esc(asset.account_name)}</td></tr>` : ""}
+    <tr><td class="label">Location:</td><td>${esc(asset.location) || "—"}</td><td class="label">Lot ID No.:</td><td>${esc(asset.land_lot_id) || "—"}</td></tr>
+    <tr><td class="label">Description:</td><td colspan="3">${esc(asset.description) || "—"}</td></tr>
+    <tr><td class="label">Classification:</td><td colspan="3">${esc(asset.land_classification) || "—"}</td></tr>
+    <tr><td class="label">Area:</td><td colspan="3">${esc(asset.land_area) || "—"}</td></tr>
+    <tr><td class="label">Technical Description:</td><td colspan="3">${esc(asset.land_technical_desc) || "—"}</td></tr>`;
+}
+/** Land and Land Improvements Ledger Card (Appendix 12) — a flat ledger like the generic Equipment
+ *  Ledger Card (no component sections; land and land-improvement accounts are single cost lines),
+ *  just with this form's own column set (Amount/Additions/Accumulated Depreciation "for Land
+ *  Improvements"/Impairment/Carrying Amount/Disposal instead of Cost/Useful Life/etc.). */
+function landLedgerCardHtml(asset) {
+  const rows = assetEventTimeline(asset);
+  const blankRows = Math.max(0, 12 - rows.length);
+  const dataRows = rows.map((r, i) => `<tr>
+    <td>${fmtDateShort(r.date)}</td><td>${esc(r.reference)}</td>
+    <td>${i === 0 ? esc(asset.description) : esc(r.label)}</td>
+    <td class="num">${i === 0 ? fmtNum(r.cost) : ""}</td>
+    <td class="num">${r.kind === "revalue" ? fmtNum(r.cost) : ""}</td>
+    <td class="num">${asset.depreciable ? fmtNum(r.accumDepr) : ""}</td>
+    <td class="num"></td>
+    <td class="num">${fmtNum(r.adjustedCost)}</td>
+    <td class="num">${r.kind === "retire" ? fmtNum(r.adjustedCost) : ""}</td>
+  </tr>`).join("");
+  return `
+    <div class="card">
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : `<div style="width:56px;"></div>`}
+        <div class="titles"><h1>LAND AND LAND IMPROVEMENTS LEDGER CARD</h1></div>
+        <div class="fund">Fund:<br><b>${esc(fundLabel(asset.fund || "GF"))}</b></div>
+      </div>
+      <table class="info">${landHeaderRows(asset, true)}</table>
+      <table class="data">
+        <thead><tr>
+          <th style="width:9%">Date</th><th style="width:11%">Reference</th><th style="width:16%">Particulars</th>
+          <th style="width:9%">Amount</th><th style="width:9%">Additions</th>
+          <th style="width:12%">Accumulated Depreciation (for Land Improvements)</th><th style="width:9%">Impairment</th>
+          <th style="width:10%">Carrying Amount</th><th style="width:9%">Disposal</th>
+        </tr></thead>
+        <tbody>
+          ${dataRows}
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank">${"<td></td>".repeat(9)}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+/** Land and Land Improvements Property Card (Annex 56) — same flat shape as the Ledger Card above
+ *  but the lighter Property Card column set (no separate Accumulated Depreciation/Impairment
+ *  split — just Amount/Additions/Adjustments/Disposal/Carrying Amount). */
+function landPropertyCardHtml(asset) {
+  const rows = assetEventTimeline(asset).filter(r => r.kind === "acquire" || r.kind === "retire" || r.kind === "revalue" || r.kind === "transfer");
+  const blankRows = Math.max(0, 12 - rows.length);
+  const dataRows = rows.map((r, i) => `<tr>
+    <td>${fmtDateShort(r.date)}</td><td>${esc(r.reference)}</td>
+    <td>${i === 0 ? esc(asset.description) : esc(r.label)}</td>
+    <td class="num">${i === 0 ? fmtNum(r.cost) : ""}</td>
+    <td class="num">${r.kind === "revalue" ? fmtNum(r.cost) : ""}</td>
+    <td class="num"></td>
+    <td class="num">${r.kind === "retire" ? fmtNum(r.adjustedCost) : ""}</td>
+    <td class="num">${fmtNum(r.adjustedCost)}</td>
+  </tr>`).join("");
+  return `
+    <div class="card">
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : `<div style="width:56px;"></div>`}
+        <div class="titles"><h1>LAND AND LAND IMPROVEMENTS PROPERTY CARD</h1></div>
+        <div class="fund">Fund:<br><b>${esc(fundLabel(asset.fund || "GF"))}</b></div>
+      </div>
+      <table class="info">${landHeaderRows(asset, false)}</table>
+      <table class="data">
+        <thead><tr>
+          <th style="width:10%">Date</th><th style="width:12%">Reference</th><th style="width:18%">Particulars</th>
+          <th style="width:10%">Amount</th><th style="width:10%">Additions</th><th style="width:10%">Adjustments</th>
+          <th style="width:10%">Disposal</th><th style="width:10%">Carrying Amount</th>
+        </tr></thead>
+        <tbody>
+          ${dataRows}
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank">${"<td></td>".repeat(8)}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>`;
+}
+/** Local Road Network Ledger Card (Appendix 13) / Property Card (Appendix 57). */
+function roadLedgerCardHtml(asset) {
+  const header = `
+    <tr><td class="label">Road Network ID No.:</td><td>${esc(asset.road_id_no) || "—"}</td></tr>
+    <tr><td class="label">Name of Road Network:</td><td>${esc(asset.description) || "—"}</td></tr>
+    <tr><td class="label">Type of Road:</td><td>${esc(asset.road_type) || "—"}</td></tr>
+    <tr><td class="label">Location:</td><td>${esc(asset.location) || "—"}</td></tr>
+    <tr><td class="label">Length / Width:</td><td>${esc(asset.road_length) || "—"} / ${esc(asset.road_width) || "—"}</td></tr>
+    <tr><td class="label">Thickness (Pavement):</td><td>${esc(asset.road_thickness) || "—"}</td></tr>`;
+  return componentSectionedCardHtml(asset, {
+    title: "LOCAL ROAD NETWORK LEDGER CARD", headerRows: header, variant: "ledger",
+    components: ["A. Road Lot", "B. Pavement", "C. Drainage and Slope Protection Structures", "D. Other Miscellaneous Structures (specify)"],
+  });
+}
+function roadPropertyCardHtml(asset) {
+  const header = `
+    <tr><td class="label">Road Network ID No.:</td><td>${esc(asset.road_id_no) || "—"}</td></tr>
+    <tr><td class="label">Name of Road Network:</td><td>${esc(asset.description) || "—"}</td></tr>
+    <tr><td class="label">Type of Road:</td><td>${esc(asset.road_type) || "—"}</td></tr>
+    <tr><td class="label">Location:</td><td>${esc(asset.location) || "—"}</td></tr>
+    <tr><td class="label">Length / Width:</td><td>${esc(asset.road_length) || "—"} / ${esc(asset.road_width) || "—"}</td></tr>
+    <tr><td class="label">Thickness (Pavement):</td><td>${esc(asset.road_thickness) || "—"}</td></tr>`;
+  return componentSectionedCardHtml(asset, {
+    title: "LOCAL ROAD NETWORK PROPERTY CARD", headerRows: header, variant: "property",
+    components: ["A. Road Lot", "B. Pavement", "C. Drainage and Slope Protection Structures", "D. Other Miscellaneous Structures (specify)"],
+  });
+}
+/** Other Public Infrastructure Ledger Card (Appendix 14) / Property Card (Appendix 58) — the rest
+ *  of the "Infrastructure Assets" group once Road Networks has its own dedicated form above. */
+function otherInfraLedgerCardHtml(asset) {
+  const header = `
+    <tr><td class="label">Account:</td><td>${formatAccountCode(asset.account_code)} — ${esc(asset.account_name)}</td><td class="label">Public Infrastructure ID No.:</td><td>${esc(asset.infra_id_no) || "—"}</td></tr>
+    <tr><td class="label">Name:</td><td colspan="3">${esc(asset.description) || "—"}</td></tr>
+    <tr><td class="label">Type:</td><td colspan="3">${esc(asset.infra_type) || "—"}</td></tr>
+    <tr><td class="label">Location:</td><td colspan="3">${esc(asset.location) || "—"}</td></tr>
+    <tr><td class="label">Other detailed description:</td><td colspan="3">${esc(asset.infra_other_desc) || "—"}</td></tr>`;
+  return componentSectionedCardHtml(asset, {
+    title: "OTHER PUBLIC INFRASTRUCTURE LEDGER CARD", headerRows: header, variant: "ledger",
+    components: ["A.", "B.", "C.", "D. Others (specify)"],
+  });
+}
+function otherInfraPropertyCardHtml(asset) {
+  const header = `
+    <tr><td class="label">Public Infrastructure ID No.:</td><td>${esc(asset.infra_id_no) || "—"}</td></tr>
+    <tr><td class="label">Name:</td><td>${esc(asset.description) || "—"}</td></tr>
+    <tr><td class="label">Type:</td><td>${esc(asset.infra_type) || "—"}</td></tr>
+    <tr><td class="label">Location:</td><td>${esc(asset.location) || "—"}</td></tr>
+    <tr><td class="label">Other detailed description:</td><td>${esc(asset.infra_other_desc) || "—"}</td></tr>`;
+  return componentSectionedCardHtml(asset, {
+    title: "OTHER PUBLIC INFRASTRUCTURE PROPERTY CARD", headerRows: header, variant: "property",
+    components: ["A.", "B.", "C.", "D. Others (specify)"],
+  });
+}
+/** Buildings and Structures Ledger Card (Appendix 15) / Property Card (Appendix 59). */
+function buildingsLedgerCardHtml(asset) {
+  const header = `
+    <tr><td class="label">Building/Structure ID No.:</td><td>${esc(asset.bldg_id_no) || "—"}</td></tr>
+    <tr><td class="label">Name of Building/Structure:</td><td>${esc(asset.description) || "—"}</td></tr>
+    <tr><td class="label">Type/Made of Building:</td><td>${esc(asset.bldg_type_made) || "—"}</td></tr>
+    <tr><td class="label">Location:</td><td>${esc(asset.location) || "—"}</td></tr>
+    <tr><td class="label">Floor Area / No. of Floors:</td><td>${esc(asset.bldg_floor_area) || "—"} / ${esc(asset.bldg_no_of_floors) || "—"}</td></tr>`;
+  return componentSectionedCardHtml(asset, {
+    title: "BUILDINGS AND STRUCTURES LEDGER CARD", headerRows: header, variant: "ledger",
+    components: ["A. Building", "B. Air Conditioning System", "C. Elevators/Escalators", "D. Others (specify)"],
+  });
+}
+function buildingsPropertyCardHtml(asset) {
+  const header = `
+    <tr><td class="label">Building/Structure ID No.:</td><td>${esc(asset.bldg_id_no) || "—"}</td></tr>
+    <tr><td class="label">Name of Building/Structure:</td><td>${esc(asset.description) || "—"}</td></tr>
+    <tr><td class="label">Type/Made of Building:</td><td>${esc(asset.bldg_type_made) || "—"}</td></tr>
+    <tr><td class="label">Location:</td><td>${esc(asset.location) || "—"}</td></tr>
+    <tr><td class="label">Floor Area / No. of Floors:</td><td>${esc(asset.bldg_floor_area) || "—"} / ${esc(asset.bldg_no_of_floors) || "—"}</td></tr>`;
+  return componentSectionedCardHtml(asset, {
+    title: "BUILDINGS AND STRUCTURES PROPERTY CARD", headerRows: header, variant: "property",
+    components: ["A. Building", "B. Air Conditioning System", "C. Elevators/Escalators", "D. Others (specify)"],
+  });
+}
+
 function openPrintWindow(title, html) {
   const w = window.open("", "_blank");
   if (!w) { toast("Your browser blocked the print window — allow pop-ups for this site and try again."); return; }
@@ -3234,8 +3704,29 @@ function openPrintWindow(title, html) {
  *  template vs Semi-Expendable's own (no Accumulated Depreciation column). Used everywhere cards are
  *  printed, single or bulk, so a mixed-type selection (e.g. the whole filtered Register) prints each
  *  row with the correct form. */
-function ledgerCardHtmlFor(asset) { return itemTypeOf(asset) === "sx" ? sxLedgerCardHtml(asset) : ledgerCardCardHtml(asset); }
-function propertyCardHtmlFor(asset) { return itemTypeOf(asset) === "sx" ? sxPropertyCardHtml(asset) : propertyCardCardHtml(asset); }
+function ledgerCardHtmlFor(asset) {
+  if (itemTypeOf(asset) === "sx") return sxLedgerCardHtml(asset);
+  switch (specialCardGroupFor(asset.account_code)) {
+    case "land": return landLedgerCardHtml(asset);
+    case "road": return roadLedgerCardHtml(asset);
+    case "otherinfra": return otherInfraLedgerCardHtml(asset);
+    case "buildings": return buildingsLedgerCardHtml(asset);
+    // Biological Assets only got a dedicated Property Card (Appendix 55) from the client — no
+    // separate Ledger Card form exists for it, so it keeps the generic Equipment Ledger Card here.
+    default: return ledgerCardCardHtml(asset);
+  }
+}
+function propertyCardHtmlFor(asset) {
+  if (itemTypeOf(asset) === "sx") return sxPropertyCardHtml(asset);
+  switch (specialCardGroupFor(asset.account_code)) {
+    case "biological": return bioAssetPropertyCardHtml(asset);
+    case "land": return landPropertyCardHtml(asset);
+    case "road": return roadPropertyCardHtml(asset);
+    case "otherinfra": return otherInfraPropertyCardHtml(asset);
+    case "buildings": return buildingsPropertyCardHtml(asset);
+    default: return propertyCardCardHtml(asset);
+  }
+}
 function printLedgerCard(id) {
   const a = S.assets.get(id);
   if (!a) return;
@@ -3304,7 +3795,7 @@ function filterParIcsRows(f) {
     rows = rows.filter(r => [r.number, r.description, r.dept_office, r.entity_name, r.property_number, r.item_no]
       .some(v => v && String(v).toLowerCase().includes(q)));
   }
-  rows.sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
+  rows.sort((a, b) => (b.number || "").localeCompare(a.number || "", undefined, { numeric: true }) || (b.date || "").localeCompare(a.date || ""));
   return rows;
 }
 /** Summary CSV of PAR/ICS records — respects the tab's current search/type/status filters, same
@@ -3955,7 +4446,7 @@ function filterPtrItrRows(f) {
     rows = rows.filter(r => [r.number, r.description, r.property_no, r.sen, r.from_officer, r.to_officer, r.from_location, r.to_location]
       .some(v => v && String(v).toLowerCase().includes(q)));
   }
-  rows.sort((a, b) => (b.date || "").localeCompare(a.date || "") || (b.created_at || "").localeCompare(a.created_at || ""));
+  rows.sort((a, b) => (b.number || "").localeCompare(a.number || "", undefined, { numeric: true }) || (b.date || "").localeCompare(a.date || ""));
   return rows;
 }
 /** Summary CSV of PTR/ITR records — respects the tab's current search/type filters, same pattern
@@ -4343,14 +4834,14 @@ function renderReports() {
       <div class="panel-body flush"><div class="tablewrap"><table>
         <thead><tr><th>Type</th><th>Property/SEN</th><th>Category</th><th>Description</th><th>Status</th><th style="width:210px;">Reports</th></tr></thead>
         <tbody>${rows.length ? rows.map(a => `
-          <tr>
+          <tr class="report-row" onclick="openAssetDetail('${a.id}')">
             <td>${itemTypeOf(a) === "sx" ? '<span class="pill neutral">SX</span>' : '<span class="pill good">PPE</span>'}</td>
             <td class="mono">${esc(a.property_id) || "—"}</td>
             <td>${esc(a.account_name) || "—"}</td>
             <td class="truncate" title="${esc(a.description)}">${esc(a.description) || "—"}</td>
             <td>${a.status === "retired" ? '<span class="pill neutral">Retired</span>' : '<span class="pill good">Active</span>'}</td>
             <td>
-              <div style="display:flex;flex-direction:column;gap:6px;width:132px;">
+              <div style="display:flex;flex-direction:column;gap:6px;width:132px;" onclick="event.stopPropagation()">
                 <button class="btn" style="width:100%;justify-content:center;" onclick="printLedgerCard('${a.id}')">Ledger Card</button>
                 <button class="btn" style="width:100%;justify-content:center;" onclick="printPropertyCard('${a.id}')">Property Card</button>
               </div>
@@ -4416,22 +4907,38 @@ function printPropertyCardsBulkReports() {
 const SX_ACCOUNT_CATALOG = [
   [10405010, "Semi-Expendable Machinery"],
   [10405020, "Semi-Expendable Office Equipment"],
-  [10405030, "Semi-Expendable Information and Communication Technology Equipment"],
+  [10405030, "Semi-Expendable Information and Communications Technology Equipment"],
   [10405040, "Semi-Expendable Agricultural and Forestry Equipment"],
   [10405050, "Semi-Expendable Marine and Fishery Equipment"],
   [10405060, "Semi-Expendable Airport Equipment"],
-  [10405070, "Semi-Expendable Communication Equipment"],
-  [10405080, "Semi-Expendable Construction and Heavy Equipment"],
-  [10405090, "Semi-Expendable Disaster Response and Rescue Equipment"],
-  [10405100, "Semi-Expendable Military, Police and Security Equipment"],
-  [10405110, "Semi-Expendable Medical Equipment"],
-  [10405120, "Semi-Expendable Printing Equipment"],
-  [10405130, "Semi-Expendable Sports Equipment"],
-  [10405140, "Semi-Expendable Technical and Scientific Equipment"],
+  [10405070, "Semi-Expendable Communications Equipment"],
+  [10405080, "Semi-Expendable Disaster Response and Rescue Equipment"],
+  [10405090, "Semi-Expendable Military, Police and Security Equipment"],
+  [10405100, "Semi-Expendable Medical, Dental and Laboratory Equipment"],
+  [10405110, "Semi-Expendable Printing Equipment"],
+  [10405120, "Semi-Expendable Sports Equipment"],
+  [10405130, "Semi-Expendable Technical and Scientific Equipment"],
+  [10405140, "Semi-Expendable Construction Equipment"],
   [10405990, "Semi-Expendable Other Machinery and Equipment"],
   [10406010, "Semi-Expendable Furniture and Fixtures"],
   [10406020, "Semi-Expendable Books"],
 ];
+/* 2026-09 fix: codes 10405080-10405140 were previously shifted by one slot (each held the name
+ * that belongs to the code before it, and 10405080 held a name — "Construction and Heavy
+ * Equipment" — that isn't in the official list at all, apparently copied from PPE code 10705080).
+ * SX_CODE_RELABEL_2026_09 below maps old (wrong) name -> new (correct) name so any asset already
+ * recorded under one of these codes gets its account_name corrected to match — see
+ * relabelMisassignedSxAccounts(), run once from the browser console by the Admin after deploying
+ * this fix (not automatic, since it writes to every affected asset doc). */
+const SX_CODE_RELABEL_2026_09 = {
+  10405080: "Semi-Expendable Construction and Heavy Equipment",
+  10405090: "Semi-Expendable Disaster Response and Rescue Equipment",
+  10405100: "Semi-Expendable Military, Police and Security Equipment",
+  10405110: "Semi-Expendable Medical Equipment",
+  10405120: "Semi-Expendable Printing Equipment",
+  10405130: "Semi-Expendable Sports Equipment",
+  10405140: "Semi-Expendable Technical and Scientific Equipment",
+};
 const SX_ACCOUNT_BY_CODE = {};
 SX_ACCOUNT_CATALOG.forEach(([code, name]) => {
   // Same shape as ACCOUNT_BY_CODE's entries (see accountInfo() above) — depreciable is always
@@ -4439,6 +4946,42 @@ SX_ACCOUNT_CATALOG.forEach(([code, name]) => {
   // depreciated.
   SX_ACCOUNT_BY_CODE[code] = { group: "Semi-Expendable Property", code, name, depreciable: false, expCode: null, expName: null };
 });
+
+/** Self-healing fix-up for the 2026-09 catalog correction above: any asset recorded under one of
+ *  the 7 shifted codes, whose account_name still exactly matches the OLD (wrong) label, gets its
+ *  account_name corrected to match the fixed catalog. Runs every time the Admin's session gets a
+ *  fresh assets snapshot — that's naturally cheap and idempotent (nothing is left to match once a
+ *  record is corrected, so a repeat run does no work at all beyond the filter), which matters
+ *  because it's the only way this is guaranteed to actually run against every pre-existing
+ *  record: real Firestore delivers the complete current collection on the Admin's very first
+ *  snapshot, but a stray edge case (a slow initial sync that streams older docs in after the first
+ *  callback, a reconnect) could otherwise let a record slip past a "run only once" guard forever.
+ *  `inFlight` just stops two overlapping runs from double-writing the same doc while an earlier
+ *  run's writes are still in progress — it is not a "ran once" flag. App-level only (same
+ *  "opt-in convenience, not a security boundary" model as the rest of this file); ordinary
+ *  (non-Admin) sessions never attempt it, so there's no risk of many clerks' browsers racing to
+ *  write the same fix-up simultaneously. */
+let sxRelabelInFlight = false;
+async function relabelMisassignedSxAccounts() {
+  if (sxRelabelInFlight || !S.ready || !isAdmin()) return;
+  const toFix = [...S.assets.values()].filter(a => {
+    const oldName = SX_CODE_RELABEL_2026_09[a.account_code];
+    return oldName && a.account_name === oldName;
+  });
+  if (!toFix.length) return;
+  sxRelabelInFlight = true;
+  try {
+    for (const a of toFix) {
+      const correct = SX_ACCOUNT_BY_CODE[a.account_code];
+      await S.db.collection("assets").doc(a.id).update({ account_name: correct.name });
+    }
+    toast(`Fixed ${toFix.length} Semi-Expendable item(s) that had a mislabeled account name (data correction, 2026-09).`);
+  } catch (e) {
+    console.error("relabelMisassignedSxAccounts failed:", e);
+  } finally {
+    sxRelabelInFlight = false;
+  }
+}
 
 /** Retirement always requires picking one of these — every item (PPE or Semi-Expendable) needs a
  *  reason and detail to retire, since the two now sit together in one Retired Items list. */
