@@ -889,7 +889,19 @@ function filterAssetRows(f) {
     rows = rows.filter(a => [a.property_id, a.sen, a.description, a.location, a.accountable_officer, a.article_type]
       .some(v => v && String(v).toLowerCase().includes(q)));
   }
-  rows.sort((a, b) => (a.account_name || "").localeCompare(b.account_name) || (a.property_id || "").localeCompare(b.property_id || ""));
+  // Primary order: account code ascending (not account name), matching the Dashboard's own "By
+  // category" ordering. An item with Php 0.00 carrying amount — typically a "found at the station"
+  // item with no cost/account assigned yet — sorts to the very bottom of the list regardless of its
+  // account code, so incomplete records don't crowd out real items near the top (Sept 2026).
+  rows.sort((a, b) => {
+    const zeroA = carryingAmount(a) === 0 ? 1 : 0;
+    const zeroB = carryingAmount(b) === 0 ? 1 : 0;
+    if (zeroA !== zeroB) return zeroA - zeroB;
+    const codeA = a.account_code ?? Infinity;
+    const codeB = b.account_code ?? Infinity;
+    if (codeA !== codeB) return codeA - codeB;
+    return (a.property_id || a.sen || "").localeCompare(b.property_id || b.sen || "");
+  });
   return rows;
 }
 /** Assets matching the Asset Register's current search/category/status/type/classification filters, in on-screen order. */
