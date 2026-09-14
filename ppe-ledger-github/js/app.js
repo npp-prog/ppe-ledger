@@ -85,6 +85,17 @@ function isCipAccount(code) { return CIP_ACCOUNT_CODES.includes(Number(code)); }
  * account code, specialCardFieldsHtml()/readSpecialCardFieldsFromForm() render and read them. */
 const LAND_ACCOUNT_CODES = [10701010, 10702010, 10702990];
 const ROAD_ACCOUNT_CODES = [10703010];
+/** The four cost components a Road Network asset is booked in (see roadComponentAmounts() below) —
+ *  shared between the single-item Add/Edit form (specialCardFieldsHtml's "road" group), the bulk
+ *  importer, and the CIP-completion flow (openCipCompleteModal/completeCipProject), so a CIP
+ *  transfer can say which bucket its billed total belongs in without duplicating this mapping. */
+const ROAD_CATEGORY_FIELDS = {
+  lot: "road_lot_value", pavement: "road_pavement_value", drainage: "road_drainage_value", other: "road_other_value",
+};
+const ROAD_CATEGORY_LABELS = {
+  lot: "A. Road Lot", pavement: "B. Pavement",
+  drainage: "C. Drainage and Slope Protection Structures", other: "D. Other Miscellaneous Structures",
+};
 const OTHER_INFRA_ACCOUNT_CODES = [10703020, 10703030, 10703040, 10703050, 10703060, 10703070, 10703080, 10703090, 10703990];
 const BUILDINGS_ACCOUNT_CODES = [10704010, 10704020, 10704030, 10704040, 10704050, 10704060, 10704990];
 const BIOLOGICAL_ACCOUNT_CODES = [10801010, 10801020, 10801030, 10801990];
@@ -861,7 +872,7 @@ function renderDashboard() {
     <div class="panel">
       <div class="panel-head">
         <div><h3>Construction in Progress — Complete, awaiting transfer</h3><div class="desc">${cipComplete.length} project(s) have reached final billing but haven't been transferred to PPE yet</div></div>
-        <button class="btn" onclick="setView('cip')">Open Construction in Progress →</button>
+        <button class="btn primary" onclick="setView('cip')">Open Construction in Progress →</button>
       </div>
       <div class="panel-body${cipComplete.length ? " flush" : ""}">
         ${cipComplete.length ? `<div class="tablewrap"><table>
@@ -880,7 +891,7 @@ function renderDashboard() {
     ${flags.length ? `
     <div class="panel">
       <div class="panel-head"><div><h3>Needs your attention</h3><div class="desc">Accounts where the register doesn't tie to the ${periodShort(latestTbPeriod)} Trial Balance</div></div>
-        <button class="btn" onclick="setView('reconciliation')">Open Reconciliation →</button></div>
+        <button class="btn primary" onclick="setView('reconciliation')">Open Reconciliation →</button></div>
       <div class="panel-body"><div class="flag-list">
         ${flags.map(f => `<div class="flag-item bad">
             <span class="pill bad">CHECK</span>
@@ -973,13 +984,13 @@ function renderRegister() {
           <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
         </select>
         <span style="flex:1"></span>
-        <button class="btn" onclick="exportRegisterCsv()">Download CSV</button>
-        <button class="btn" onclick="printLedgerCardsBulk()">Print Ledger Cards</button>
-        <button class="btn" onclick="printPropertyCardsBulk()">Print Property Cards</button>
+        <button class="btn primary" onclick="exportRegisterCsv()">Download CSV</button>
+        <button class="btn primary" onclick="printLedgerCardsBulk()">Print Ledger Cards</button>
+        <button class="btn primary" onclick="printPropertyCardsBulk()">Print Property Cards</button>
         ${canEdit("register") ? `
-        <button class="btn" onclick="openBulkAddModal()">Bulk add PPE (paste)</button>
-        <button class="btn" onclick="openSxBulkAddModal()">Bulk add Semi-Expendable (paste)</button>
-        <button class="btn" onclick="openRoadBulkImportModal()">Bulk import Road Network (paste)</button>
+        <button class="btn primary" onclick="openBulkAddModal()">Bulk add PPE (paste)</button>
+        <button class="btn primary" onclick="openSxBulkAddModal()">Bulk add Semi-Expendable (paste)</button>
+        <button class="btn primary" onclick="openRoadBulkImportModal()">Bulk import Road Network (paste)</button>
         <button class="btn primary" onclick="openAssetModal()">+ Add item</button>` : ""}
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
@@ -2137,8 +2148,8 @@ function renderDepreciation() {
       <div class="panel-head">
         <div><h3>JEV summary — ${periodLabel(period)}</h3><div class="desc">Journal entry voucher grouping, ready to hand off for posting to your books</div></div>
         <div style="display:flex;gap:8px;">
-          <button class="btn" onclick="exportJevCsv('${period}')">Export CSV</button>
-          <button class="btn" onclick="window.print()">Print</button>
+          <button class="btn primary" onclick="exportJevCsv('${period}')">Export CSV</button>
+          <button class="btn primary" onclick="window.print()">Print</button>
         </div>
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
@@ -2156,7 +2167,7 @@ function renderDepreciation() {
 
     <div class="panel">
       <div class="panel-head"><h3>Per-asset detail</h3>
-        <button class="btn" onclick="exportDepreciationDetailCsv('${period}')">Download CSV</button>
+        <button class="btn primary" onclick="exportDepreciationDetailCsv('${period}')">Download CSV</button>
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
         <thead><tr><th>Property ID</th><th>Category</th><th class="num">Monthly Rate</th><th class="num">This period</th><th class="num">Accum. Depr. after</th><th class="num">Carrying after</th></tr></thead>
@@ -2279,7 +2290,7 @@ function renderReconciliation() {
     <div class="panel">
       <div class="panel-head">
         <div><h3>Variance — ${periodLabel(period)}</h3><div class="desc">${tb ? (flaggedCount ? flaggedCount + " account(s) need a look" : "Everything ties out") : "Paste a Trial Balance above to compare"}</div></div>
-        ${tb ? `<button class="btn" onclick="exportReconCsv('${period}')">Export CSV</button>` : ""}
+        ${tb ? `<button class="btn primary" onclick="exportReconCsv('${period}')">Export CSV</button>` : ""}
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
         <thead><tr><th>Account</th><th class="num">Cost — Register</th><th class="num">Cost — TB</th><th class="num">Variance</th>
@@ -2497,10 +2508,10 @@ function renderCip() {
           <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
         </select>
         <span style="flex:1"></span>
-        <button class="btn" onclick="exportCipCsv()">Download CSV</button>
-        <button class="btn" onclick="printCipLedgerCardsBulk()">Print Ledger Cards</button>
+        <button class="btn primary" onclick="exportCipCsv()">Download CSV</button>
+        <button class="btn primary" onclick="printCipLedgerCardsBulk()">Print Ledger Cards</button>
         ${canEdit("cip") ? `
-        <button class="btn" onclick="openCipBulkImportModal()">Bulk import (paste)</button>
+        <button class="btn primary" onclick="openCipBulkImportModal()">Bulk import (paste)</button>
         <button class="btn primary" onclick="openCipProjectModal()">+ New project</button>` : ""}
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
@@ -2618,7 +2629,7 @@ function openCipDetail(id) {
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
         <label style="margin:0;">Billings</label>
-        ${!isTransferred && canEdit("cip") ? `<button class="btn small" onclick="openCipBillingModal('${p.id}')">+ Add billing</button>` : ""}
+        ${!isTransferred && canEdit("cip") ? `<button class="btn small primary" onclick="openCipBillingModal('${p.id}')">+ Add billing</button>` : ""}
       </div>
       <div class="tablewrap"><table style="font-size:12px;">
         <thead><tr><th>Date</th><th>Ref.</th><th>Particulars</th><th class="num">Total</th>${!isTransferred && canEdit("cip") ? "<th></th>" : ""}</tr></thead>
@@ -2635,9 +2646,9 @@ function openCipDetail(id) {
     </div>
     <div class="modal-foot">
       <button class="btn ghost" onclick="closeModal()">Close</button>
-      <button class="btn" onclick="printCipLedgerCard('${p.id}')">Ledger Card</button>
-      ${!isTransferred && canEdit("cip") ? `<button class="btn" onclick="openCipProjectModal('${p.id}')">Edit</button>` : ""}
-      ${status === "in_progress" && canEdit("cip") ? `<button class="btn" onclick="markCipComplete('${p.id}')">Mark complete</button>` : ""}
+      <button class="btn primary" onclick="printCipLedgerCard('${p.id}')">Ledger Card</button>
+      ${!isTransferred && canEdit("cip") ? `<button class="btn primary" onclick="openCipProjectModal('${p.id}')">Edit</button>` : ""}
+      ${status === "in_progress" && canEdit("cip") ? `<button class="btn primary" onclick="markCipComplete('${p.id}')">Mark complete</button>` : ""}
       ${!isTransferred && canEdit("cip") ? `<button class="btn primary" onclick="openCipCompleteModal('${p.id}')">Complete → transfer to PPE</button>` : ""}
     </div>
   `);
@@ -2707,7 +2718,7 @@ function openCipBillingModal(projectId, index, useDraft) {
         <label>Matched SWA <span class="subtle" style="font-weight:400;">(Statement of Works Accomplished)</span></label>
         ${swaId
           ? `<div class="banner info" style="margin:0;">${swa ? `SWA ${esc(swa.swa_no)} — ${esc(swa.contractor) || "—"} — ${fmtMoney(swa.cost)}` : `SWA ${esc(swaNo)}`} <a href="#" onclick="unmatchDraftSwa('${p.id}', ${index != null ? index : "null"});return false;" style="margin-left:10px;">Unmatch</a></div>`
-          : `<button type="button" class="btn small" onclick="openMatchSwaModal('${p.id}', ${index != null ? index : "null"})">🔗 Match SWA</button>`}
+          : `<button type="button" class="btn small primary" onclick="openMatchSwaModal('${p.id}', ${index != null ? index : "null"})">🔗 Match SWA</button>`}
       </div>
     </div>
     <div class="modal-foot">
@@ -2752,7 +2763,7 @@ function openMatchSwaModal(projectId, index) {
       <p class="subtle" style="margin-top:0;">Pick the Statement of Works Accomplished already uploaded for ${esc(p ? p.cip_code : "this project")} — matching links the two records and fills in Transaction date / Cost — By Contract if those are still blank.</p>
       <input type="text" id="swaMatchSearch" placeholder="Search SWA No., CIP No., contractor…" value="${esc(p ? p.cip_code : "")}">
       <div id="swaMatchResults" style="margin-top:10px;"></div>
-      <button class="btn" style="margin-top:12px;" onclick="openCipBillingModal('${projectId}', ${index != null ? index : "null"}, true)">← Back</button>
+      <button class="btn primary" style="margin-top:12px;" onclick="openCipBillingModal('${projectId}', ${index != null ? index : "null"}, true)">← Back</button>
     </div>
   `);
   document.getElementById("swaMatchSearch").addEventListener("input", e => renderMatchSwaResults(e.target.value));
@@ -2886,6 +2897,15 @@ function defaultTransferAccountFor(cipCode) {
   if (cipCode === 10710030) return 10704990; // Other Structures
   return 10799990;
 }
+/** Existing Road Network assets a CIP project can be added onto (see ct_road_block below) — same
+ *  fund only, and only assets still active (a retired road shouldn't quietly gain new cost). */
+function roadNetworkOptions(fund) {
+  const roads = [...S.assets.values()]
+    .filter(a => a.status === "active" && (a.fund || "GF") === fund && ROAD_ACCOUNT_CODES.includes(Number(a.account_code)))
+    .sort((a, b) => (a.description || "").localeCompare(b.description || ""));
+  if (!roads.length) return `<option value="">— no existing roads in this fund yet —</option>`;
+  return roads.map(a => `<option value="${a.id}">${esc(a.property_id || a.road_id_no || "—")} — ${esc(a.description || "Unnamed road")}</option>`).join("");
+}
 function openCipCompleteModal(id) {
   const p = S.cipProjects.get(id);
   if (!p) return;
@@ -2897,28 +2917,52 @@ function openCipCompleteModal(id) {
       <p style="margin-top:0;">${esc(p.name) || esc(p.cip_code)}</p>
       <p class="subtle" style="font-size:12.5px;">This creates a new PPE asset for the total ${fmtMoney(total)} billed to date, and marks this CIP project completed. This can't be undone from here — check the details below first.</p>
       <div class="field"><label>New asset category</label><select id="ct_account">${assetCategoryOptions(defaultCode)}</select></div>
-      <div class="fieldrow">
-        <div class="field"><label>Property / Tag No.</label><input id="ct_propid"></div>
-        <div class="field"><label>Date completed / transferred</label><input type="date" id="ct_date" value="${new Date().toISOString().slice(0, 10)}"></div>
-      </div>
-      <div class="fieldrow">
-        <div class="field"><label>Location / Office</label><input id="ct_location" value="${esc(p.location)}"></div>
-        <div class="field"><label>Accountable officer</label><input id="ct_officer"></div>
-      </div>
-      <div class="fieldrow">
-        <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="ct_life" value="25"></div>
-        <div class="field"><label>Residual value (Php)</label><input type="number" step="0.01" id="ct_residual" value="${defaultResidualFor(defaultCode, total)}"></div>
-      </div>
-      <div id="ct_buildings_block" style="display:none;">
+      <div id="ct_road_block" style="display:none;">
         <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
-        <p class="subtle" style="font-size:12.5px;margin-top:0;">This is a Buildings & Structures asset — allocate the ${fmtMoney(total)} total across its components (the printed Ledger/Property Card then shows these figures under each component instead of blank rows). Building auto-fills with whatever's left after the other three.</p>
+        <p class="subtle" style="font-size:12.5px;margin-top:0;">This is a Road Network asset. Say whether the ${fmtMoney(total)} billed total is for a brand-new road or is more work on a road already in the Register (e.g. repaving/concreting an existing street), and which of the road's 4 cost components (A–D) it represents.</p>
+        <div class="field">
+          <label style="font-weight:normal;"><input type="radio" name="ct_road_mode" value="new" checked> Create a new Road Network</label>
+          &nbsp;&nbsp;&nbsp;
+          <label style="font-weight:normal;"><input type="radio" name="ct_road_mode" value="existing"> Add to an existing Road Network</label>
+        </div>
+        <div id="ct_road_existing_wrap" class="field" style="display:none;">
+          <label>Existing road</label>
+          <select id="ct_road_existing">${roadNetworkOptions(p.fund || "GF")}</select>
+        </div>
+        <div class="field">
+          <label>Cost component this amount represents</label>
+          <select id="ct_road_category">
+            <option value="lot">A. Road Lot</option>
+            <option value="pavement" selected>B. Pavement</option>
+            <option value="drainage">C. Drainage and Slope Protection Structures</option>
+            <option value="other">D. Other Miscellaneous Structures</option>
+          </select>
+        </div>
+      </div>
+      <div id="ct_generic_fields">
         <div class="fieldrow">
-          <div class="field"><label>A. Building (Php)</label><input type="number" step="0.01" id="ct_comp_building" value="${total}"></div>
-          <div class="field"><label>B. Air Conditioning System (Php)</label><input type="number" step="0.01" id="ct_comp_aircon" value="0"></div>
+          <div class="field"><label>Property / Tag No.</label><input id="ct_propid"></div>
+          <div class="field"><label>Date completed / transferred</label><input type="date" id="ct_date" value="${new Date().toISOString().slice(0, 10)}"></div>
         </div>
         <div class="fieldrow">
-          <div class="field"><label>C. Elevators/Escalators (Php)</label><input type="number" step="0.01" id="ct_comp_elevators" value="0"></div>
-          <div class="field"><label>D. Others (specify) (Php)</label><input type="number" step="0.01" id="ct_comp_others" value="0"></div>
+          <div class="field"><label>Location / Office</label><input id="ct_location" value="${esc(p.location)}"></div>
+          <div class="field"><label>Accountable officer</label><input id="ct_officer"></div>
+        </div>
+        <div class="fieldrow">
+          <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="ct_life" value="25"></div>
+          <div class="field"><label>Residual value (Php)</label><input type="number" step="0.01" id="ct_residual" value="${defaultResidualFor(defaultCode, total)}"></div>
+        </div>
+        <div id="ct_buildings_block" style="display:none;">
+          <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+          <p class="subtle" style="font-size:12.5px;margin-top:0;">This is a Buildings & Structures asset — allocate the ${fmtMoney(total)} total across its components (the printed Ledger/Property Card then shows these figures under each component instead of blank rows). Building auto-fills with whatever's left after the other three.</p>
+          <div class="fieldrow">
+            <div class="field"><label>A. Building (Php)</label><input type="number" step="0.01" id="ct_comp_building" value="${total}"></div>
+            <div class="field"><label>B. Air Conditioning System (Php)</label><input type="number" step="0.01" id="ct_comp_aircon" value="0"></div>
+          </div>
+          <div class="fieldrow">
+            <div class="field"><label>C. Elevators/Escalators (Php)</label><input type="number" step="0.01" id="ct_comp_elevators" value="0"></div>
+            <div class="field"><label>D. Others (specify) (Php)</label><input type="number" step="0.01" id="ct_comp_others" value="0"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -2932,8 +2976,35 @@ function openCipCompleteModal(id) {
   // Re-suggest the Residual value whenever the target category changes — 0 for an Infrastructure
   // Assets category (item 6, Sept 2026), else the usual 5%-of-cost convention.
   const recomputeCtResidual = () => { document.getElementById("ct_residual").value = defaultResidualFor(Number(document.getElementById("ct_account").value), total); };
-  document.getElementById("ct_account").addEventListener("change", () => { toggleBuildingsBlock(); recomputeCtResidual(); });
+  // Road Networks (Sept 2026 follow-up): show the existing-vs-new / A–D component picker only for
+  // a Road Networks target category, and hide the generic new-asset fields (Property No., Location,
+  // Useful life, Residual, etc.) when adding onto an EXISTING road — none of those apply, since no
+  // new asset is being created in that case (see completeCipProject).
+  const roadBlock = document.getElementById("ct_road_block");
+  const roadExistingWrap = document.getElementById("ct_road_existing_wrap");
+  const genericFields = document.getElementById("ct_generic_fields");
+  const toggleRoadBlock = () => {
+    const isRoad = ROAD_ACCOUNT_CODES.includes(Number(document.getElementById("ct_account").value));
+    roadBlock.style.display = isRoad ? "" : "none";
+    const mode = (document.querySelector('input[name="ct_road_mode"]:checked') || {}).value || "new";
+    roadExistingWrap.style.display = (isRoad && mode === "existing") ? "" : "none";
+    genericFields.style.display = (isRoad && mode === "existing") ? "none" : "";
+  };
+  // For a NEW road, auto-suggest the Residual value from the chosen component — Road Lot IS the
+  // residual value (land never depreciates), any other component defaults to zero residual, same
+  // rule roadComponentAmounts()/the single-item Add form already apply.
+  const recomputeRoadResidual = () => {
+    const isRoad = ROAD_ACCOUNT_CODES.includes(Number(document.getElementById("ct_account").value));
+    const mode = (document.querySelector('input[name="ct_road_mode"]:checked') || {}).value || "new";
+    if (!isRoad || mode !== "new") return;
+    document.getElementById("ct_residual").value = document.getElementById("ct_road_category").value === "lot" ? total : 0;
+  };
+  document.getElementById("ct_account").addEventListener("change", () => { toggleBuildingsBlock(); toggleRoadBlock(); recomputeCtResidual(); recomputeRoadResidual(); });
+  document.querySelectorAll('input[name="ct_road_mode"]').forEach(el => el.addEventListener("change", () => { toggleRoadBlock(); recomputeRoadResidual(); }));
+  document.getElementById("ct_road_category").addEventListener("change", recomputeRoadResidual);
   toggleBuildingsBlock();
+  toggleRoadBlock();
+  recomputeRoadResidual();
   // "Building" auto-absorbs whatever's left after Air Conditioning/Elevators/Others, so the four
   // components always sum to the total without the user having to do the subtraction by hand.
   const recomputeBuilding = () => {
@@ -2953,7 +3024,51 @@ async function completeCipProject(id) {
   if (total <= 0) return toast("This project has no billings to capitalize yet.");
   const code = Number(document.getElementById("ct_account").value);
   const info = accountInfo(code);
-  const date = document.getElementById("ct_date").value || new Date().toISOString().slice(0, 10);
+  const date = document.getElementById("ct_date") ? (document.getElementById("ct_date").value || new Date().toISOString().slice(0, 10)) : new Date().toISOString().slice(0, 10);
+  const isRoad = ROAD_ACCOUNT_CODES.includes(code);
+  const roadMode = isRoad ? ((document.querySelector('input[name="ct_road_mode"]:checked') || {}).value || "new") : null;
+  const roadCategory = isRoad ? document.getElementById("ct_road_category").value : null;
+  const roadField = isRoad ? ROAD_CATEGORY_FIELDS[roadCategory] : null;
+
+  // Road Networks follow-up (Sept 2026): a CIP project can either become a brand-new road, or add
+  // its billed total onto a road ALREADY in the Register — e.g. "Concreting of Pajarillo St." is
+  // more Pavement cost on an existing street, not a new one. Adding to an existing road doesn't
+  // create a new asset at all: it bumps that road's chosen component (A–D) and logs the change as a
+  // Revaluation (the same audit-trail mechanism revalueAsset() already uses), so the printed Ledger
+  // Card shows a real dated entry for it rather than a silent number change.
+  if (isRoad && roadMode === "existing") {
+    const existingId = document.getElementById("ct_road_existing").value;
+    const existing = existingId ? S.assets.get(existingId) : null;
+    if (!existing) return toast("Select which existing road this billed total should be added to.");
+    const fieldsAfter = {
+      road_lot_value: existing.road_lot_value || 0, road_pavement_value: existing.road_pavement_value || 0,
+      road_drainage_value: existing.road_drainage_value || 0, road_other_value: existing.road_other_value || 0,
+    };
+    fieldsAfter[roadField] = round2((fieldsAfter[roadField] || 0) + total);
+    const newCost = round2(fieldsAfter.road_lot_value + fieldsAfter.road_pavement_value + fieldsAfter.road_drainage_value + fieldsAfter.road_other_value);
+    const oldResidual = existing.residual_value || 0;
+    const newResidual = roadField === "road_lot_value" ? fieldsAfter.road_lot_value : oldResidual;
+    const revalEntry = {
+      date, old_cost: existing.cost || 0, new_cost: newCost, old_residual: oldResidual, new_residual: newResidual,
+      reason: `CIP transfer — ${p.name || p.cip_code || "project"} (${ROAD_CATEGORY_LABELS[roadCategory]}, +${fmtMoney(total)})`,
+      by: viewerLabel(), at: new Date().toISOString(),
+    };
+    try {
+      await S.db.collection("assets").doc(existingId).update({
+        [roadField]: fieldsAfter[roadField], cost: newCost, residual_value: newResidual,
+        revaluations: [...(existing.revaluations || []), revalEntry],
+        updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+      });
+      await S.db.collection("cip_projects").doc(id).update({
+        status: "completed", transferred_asset_id: existingId, transferred_at: new Date().toISOString(), transferred_by: viewerLabel(),
+        date_completed: date,
+      });
+      toast(`CIP project completed — ${fmtMoney(total)} added to ${existing.description || existing.property_id || "the selected road"} (${ROAD_CATEGORY_LABELS[roadCategory]}).`);
+      closeModal();
+    } catch (e) { console.error(e); toast("Couldn't complete — try again."); }
+    return;
+  }
+
   // Item 5 (Sept 2026): for a Buildings & Structures asset, capture the client's chosen cost split
   // across its 4 components (Building/Air Conditioning/Elevators-Escalators/Others) so the printed
   // Ledger/Property Card can show real figures for each instead of blank placeholder rows.
@@ -2964,12 +3079,22 @@ async function completeCipProject(id) {
     elevators: round2(Number(document.getElementById("ct_comp_elevators").value) || 0),
     others: round2(Number(document.getElementById("ct_comp_others").value) || 0),
   } : null;
+  // A brand-new Road Network created from a CIP transfer: the whole billed total is seeded into
+  // whichever single component (A–D) the client picked, the same convention roadComponentAmounts()/
+  // the single-item Add form use — the printed card then shows a real figure there instead of blank.
+  const roadComponents = isRoad ? {
+    road_lot_value: roadField === "road_lot_value" ? total : 0,
+    road_pavement_value: roadField === "road_pavement_value" ? total : 0,
+    road_drainage_value: roadField === "road_drainage_value" ? total : 0,
+    road_other_value: roadField === "road_other_value" ? total : 0,
+  } : null;
+  const propId = document.getElementById("ct_propid").value.trim();
   try {
     const ref = await S.db.collection("assets").add({
       fund: p.fund || "GF",
       account_code: code, account_name: info.name, ad_account_code: code + 1,
       dep_exp_account_code: info.expCode, dep_exp_account_name: info.expName,
-      property_id: document.getElementById("ct_propid").value.trim(),
+      property_id: propId,
       date_acquired: date,
       description: p.name || "",
       location: document.getElementById("ct_location").value.trim(),
@@ -2980,6 +3105,7 @@ async function completeCipProject(id) {
       useful_life_years: Number(document.getElementById("ct_life").value) || 0,
       depreciable: !!info.depreciable, status: "active", accum_depr_baseline: 0,
       ...(buildingComponents ? { building_components: buildingComponents } : {}),
+      ...(roadComponents ? { ...roadComponents, road_id_no: propId } : {}),
       source_sheet: `Transferred from CIP ${p.cip_code || ""}`.trim(),
       updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     });
@@ -3516,10 +3642,18 @@ function openHorModal(existingId) {
         <button type="button" class="btn small" style="margin-top:6px;" onclick="addHorSparepartLine()">+ Add line</button>
       </div>
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <p class="subtle" style="font-size:11.5px;margin:0 0 6px;">Name and position/office print exactly as typed here — nothing is pre-filled, since these vary by office and change over time.</p>
       <div class="fieldrow">
-        <div class="field"><label>Prepared by</label><input id="h_prepared_by" value="${esc(r ? r.prepared_by : "")}"></div>
-        <div class="field"><label>Verified by</label><input id="h_verified_by" value="${esc(r ? r.verified_by : "")}"></div>
-        <div class="field"><label>Noted by</label><input id="h_noted_by" value="${esc(r ? r.noted_by : "")}"></div>
+        <div class="field"><label>Prepared by — name</label><input id="h_prepared_by" value="${esc(r ? r.prepared_by : "")}"></div>
+        <div class="field"><label>Prepared by — position/office</label><input id="h_prepared_by_pos" value="${esc(r ? r.prepared_by_position : "")}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Verified by — name</label><input id="h_verified_by" value="${esc(r ? r.verified_by : "")}"></div>
+        <div class="field"><label>Verified by — position/office</label><input id="h_verified_by_pos" value="${esc(r ? r.verified_by_position : "")}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Noted by — name</label><input id="h_noted_by" value="${esc(r ? r.noted_by : "")}"></div>
+        <div class="field"><label>Noted by — position/office</label><input id="h_noted_by_pos" value="${esc(r ? r.noted_by_position : "")}"></div>
       </div>
     </div>
     <div class="modal-foot">
@@ -3591,8 +3725,11 @@ async function saveHorRecord(existingId) {
     supplier: document.getElementById("h_supplier").value.trim(),
     spareparts, total_cost: totalCost,
     prepared_by: document.getElementById("h_prepared_by").value.trim(),
+    prepared_by_position: document.getElementById("h_prepared_by_pos").value.trim(),
     verified_by: document.getElementById("h_verified_by").value.trim(),
+    verified_by_position: document.getElementById("h_verified_by_pos").value.trim(),
     noted_by: document.getElementById("h_noted_by").value.trim(),
+    noted_by_position: document.getElementById("h_noted_by_pos").value.trim(),
     updated_by: viewerLabel(), updated_at: new Date().toISOString(),
   };
   let id = existingId;
@@ -3715,17 +3852,17 @@ function horHtml(assetId) {
         <div class="col">
           <div class="who">Prepared by:</div>
           <div class="pos">${esc(latest.prepared_by) || "&nbsp;"}</div>
-          <div class="poscap">Motorpool Coordinator - Designate</div>
+          <div class="poscap">${esc(latest.prepared_by_position) || "&nbsp;"}</div>
         </div>
         <div class="col">
           <div class="who">Verified by:</div>
           <div class="pos">${esc(latest.verified_by) || "&nbsp;"}</div>
-          <div class="poscap">Inspection Incharge</div>
+          <div class="poscap">${esc(latest.verified_by_position) || "&nbsp;"}</div>
         </div>
         <div class="col">
           <div class="who">Noted by:</div>
           <div class="pos">${esc(latest.noted_by) || "&nbsp;"}</div>
-          <div class="poscap">Municipal Mayor</div>
+          <div class="poscap">${esc(latest.noted_by_position) || "&nbsp;"}</div>
         </div>
       </div>
     </div>`;
@@ -4219,9 +4356,14 @@ function bioAssetPropertyCardHtml(asset) {
  *  57/58/59, with just Adjustment/s / Adjusted Cost) variants share this shape. The official forms
  *  break each asset into named sub-components (e.g. a road's "A. Road Lot" / "B. Pavement" / ...)
  *  with their own cost lines — this app tracks one cost/history per asset, not per component, so
- *  the asset's own acquisition/revaluation/depreciation/retirement history prints under the first
- *  ("primary") component and the remaining components print as blank, pre-labeled rows ready for
- *  the office to fill in by hand, exactly like the blank rows on every other card in this app. */
+ *  the asset's own acquisition/revaluation/depreciation/retirement history prints under one
+ *  designated "primary" component (`opts.primaryIndex`, defaulting to 0/the first component — e.g.
+ *  Buildings' "A. Building", which really is the depreciating part) and every other component prints
+ *  either a real static figure (`opts.componentAmounts[idx]`, when known) or a blank, pre-labeled row
+ *  ready for the office to fill in by hand, exactly like the blank rows on every other card in this
+ *  app. Road Networks overrides `primaryIndex` to 1 ("B. Pavement") rather than 0 ("A. Road Lot"),
+ *  since Road Lot is specifically the one component that must never show depreciation — see
+ *  roadLedgerCardHtml/roadComponentAmounts below for the full reasoning (Sept 2026 fix). */
 function componentSectionedCardHtml(asset, opts) {
   const isLedger = opts.variant === "ledger";
   const colCount = isLedger ? 12 : 9;
@@ -4271,11 +4413,16 @@ function componentSectionedCardHtml(asset, opts) {
     </tr>`);
   const primaryData = timeline.map((r, i) => dataRowHtml(r, i)).join("");
   const amounts = opts.componentAmounts || [];
-  const sections = [sectionHtml(opts.components[0], Math.max(2, 5 - timeline.length), primaryData)]
-    .concat(opts.components.slice(1).map((label, i) => {
-      const amount = amounts[i + 1];
-      return sectionHtml(label, amount != null ? 4 : 5, componentDataRow(amount));
-    }));
+  // Which component gets the asset's real, dynamic cost/depreciation timeline — defaults to the
+  // first component (A), which is correct whenever component A is itself the depreciating thing
+  // (e.g. Buildings' "A. Building"). Road Networks overrides this to 1 ("B. Pavement"), since its
+  // component A (Road Lot) is specifically the non-depreciable piece — see roadLedgerCardHtml below
+  // and the Sept 2026 fix that moved the real timeline off of Road Lot.
+  const primaryIndex = opts.primaryIndex != null ? opts.primaryIndex : 0;
+  const sections = opts.components.map((label, idx) => {
+    if (idx === primaryIndex) return sectionHtml(label, Math.max(2, 5 - timeline.length), primaryData);
+    return sectionHtml(label, amounts[idx] != null ? 4 : 5, componentDataRow(amounts[idx]));
+  });
   const theadCols = isLedger
     ? `<tr>
         <th rowspan="2" style="width:11%">Components</th><th rowspan="2" style="width:7%">Estimated<br>Useful Life</th>
@@ -4405,6 +4552,9 @@ function roadLedgerCardHtml(asset) {
     title: "LOCAL ROAD NETWORK LEDGER CARD", headerRows: header, variant: "ledger",
     components: ["A. Road Lot", "B. Pavement", "C. Drainage and Slope Protection Structures", "D. Other Miscellaneous Structures (specify)"],
     componentAmounts: roadComponentAmounts(asset),
+    // Road Lot (A) never depreciates — its real cost/AD/carrying-amount timeline belongs under
+    // Pavement (B), the component that's actually accruing the depreciation. See the Sept 2026 fix.
+    primaryIndex: 1,
   });
 }
 function roadPropertyCardHtml(asset) {
@@ -4419,6 +4569,7 @@ function roadPropertyCardHtml(asset) {
     title: "LOCAL ROAD NETWORK PROPERTY CARD", headerRows: header, variant: "property",
     components: ["A. Road Lot", "B. Pavement", "C. Drainage and Slope Protection Structures", "D. Other Miscellaneous Structures (specify)"],
     componentAmounts: roadComponentAmounts(asset),
+    primaryIndex: 1,
   });
 }
 /** Other Public Infrastructure Ledger Card (Appendix 14) / Property Card (Appendix 58) — the rest
@@ -4491,16 +4642,20 @@ function buildingComponentAmounts(asset) {
  *  away by folding it into `residual_value` (residual_value = road_lot_value, exactly — see
  *  isZeroResidualAccount()/defaultResidualFor() near the top of this file and the Road Network bulk
  *  import below) — the schedule then depreciates only B+C+D, at zero residual, matching the
- *  government's "Infrastructure Assets carry zero residual value" policy. `road_lot_value` /
- *  `road_pavement_value` / `road_drainage_value` / `road_other_value` are kept purely so the printed
- *  card can show each category's own real figure instead of a blank placeholder row (component A's
- *  own row already carries the full combined cost via the real timeline, same convention as
- *  buildingComponentAmounts() above) — a real 0 once a category is actually tracked prints as
- *  "0.00"; a category never entered at all (an older road predating this split) still prints blank. */
+ *  government's "Infrastructure Assets carry zero residual value" policy.
+ *  Printed-card display (Sept 2026, next fix): the real cost/AD/carrying-amount timeline is shown
+ *  under Pavement (B), not Road Lot (A) — `roadLedgerCardHtml`/`roadPropertyCardHtml` pass
+ *  `primaryIndex: 1` to componentSectionedCardHtml for exactly this reason, since Road Lot must never
+ *  show accumulated depreciation. Road Lot's own row here (index 0) is therefore its own real, static
+ *  figure — cost = road_lot_value, no depreciation, carrying amount = road_lot_value, forever — the
+ *  same "included in acquisition cost above" static-row treatment every non-primary component already
+ *  gets. `road_drainage_value`/`road_other_value` (C/D) keep the same static-row treatment they always
+ *  had; a real 0 once a category is actually tracked prints as "0.00", a category never entered at all
+ *  (an older road predating this split) still prints blank. */
 function roadComponentAmounts(asset) {
   if (asset.road_pavement_value == null && asset.road_lot_value == null) return [];
   const orNull = v => v != null ? v : null;
-  return [null, orNull(asset.road_pavement_value), orNull(asset.road_drainage_value), orNull(asset.road_other_value)];
+  return [orNull(asset.road_lot_value), null, orNull(asset.road_drainage_value), orNull(asset.road_other_value)];
 }
 
 function openPrintWindow(title, html) {
@@ -5645,9 +5800,9 @@ function renderReports() {
           <option value="all" ${f.status === "all" ? "selected" : ""}>All</option>
         </select>
         <span style="flex:1"></span>
-        <button class="btn" onclick="exportReportsCsv()">Download CSV</button>
-        <button class="btn" onclick="printLedgerCardsBulkReports()">Print Ledger Cards (${rows.length})</button>
-        <button class="btn" onclick="printPropertyCardsBulkReports()">Print Property Cards (${rows.length})</button>
+        <button class="btn primary" onclick="exportReportsCsv()">Download CSV</button>
+        <button class="btn primary" onclick="printLedgerCardsBulkReports()">Print Ledger Cards (${rows.length})</button>
+        <button class="btn primary" onclick="printPropertyCardsBulkReports()">Print Property Cards (${rows.length})</button>
       </div>
       <div class="subtle" style="padding:2px 14px 10px;font-size:12.5px;">${rows.length} item(s)${f.officer === NO_OFFICER ? ` with no accountable officer assigned` : f.officer ? ` accountable to <b>${esc(f.officer)}</b>` : ""} — total cost ${fmtMoney(totalCost)}, carrying amount ${fmtMoney(totalCarrying)}</div>
       <div class="panel-body flush"><div class="tablewrap"><table>
@@ -5661,8 +5816,8 @@ function renderReports() {
             <td>${a.status === "retired" ? '<span class="pill neutral">Retired</span>' : '<span class="pill good">Active</span>'}</td>
             <td>
               <div style="display:flex;flex-direction:column;gap:6px;width:132px;" onclick="event.stopPropagation()">
-                <button class="btn" style="width:100%;justify-content:center;" onclick="printLedgerCard('${a.id}')">Ledger Card</button>
-                <button class="btn" style="width:100%;justify-content:center;" onclick="printPropertyCard('${a.id}')">Property Card</button>
+                <button class="btn primary" style="width:100%;justify-content:center;" onclick="printLedgerCard('${a.id}')">Ledger Card</button>
+                <button class="btn primary" style="width:100%;justify-content:center;" onclick="printPropertyCard('${a.id}')">Property Card</button>
               </div>
             </td>
           </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No items match these filters.</div></td></tr>`}
