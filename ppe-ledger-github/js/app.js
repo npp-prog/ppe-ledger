@@ -207,7 +207,7 @@ const BASELINE_PERIOD = "2025-12"; // last closed year-end this registry is anch
 const HARDCODED_ADMIN_EMAILS = ["npp@mgocandoniaccounting.org"];
 /** Tabs where "View" and "Edit" mean different things (there's something to Add/Edit/Delete/Post/
  *  Record/etc.). The remaining tabs are read-only by nature, so their access is a plain on/off. */
-const EDITABLE_TABS = ["register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa"];
+const EDITABLE_TABS = ["register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "hor"];
 const VIEW_ONLY_TABS = ["dashboard", "reports", "retired"];
 const ALL_PERMISSION_TABS = [...EDITABLE_TABS, ...VIEW_ONLY_TABS];
 
@@ -290,6 +290,10 @@ const S = {
                            // hand (not auto-generated) with its own Transaction Date/CIP No./SWA No./
                            // Contractor/Cost plus the actual document file, then optionally matched to
                            // a specific Construction in Progress billing — see the SWA section.
+  historyOfRepair: new Map(), // id -> History of Repair doc (own collection "history_of_repair") — one
+                           // Job Order repair record per save, always linked to an existing Asset
+                           // Register item (asset_id); saving one also appends a {type:"repair"}
+                           // entry to that asset's own ledger_entries[] — see the HOR section below.
   userRoles: new Map(),   // lowercased email -> role doc (own collection "user_roles") — see the
                            // Access Role section below. Absence of a doc for an email means "full
                            // access, opt-in restriction model" — see tabAccess().
@@ -308,6 +312,9 @@ const S = {
   parIcsFilter: { q: "", docType: "", status: "pending" },
   ptrItrFilter: { q: "", docType: "" },
   swaFilter: { q: "" },
+  horFilter: { q: "" },
+  dashboardSearch: "", // Dashboard's own global search box — matched against the Asset Register,
+                       // PAR/ICS, PTR/ITR, and History of Repair, all scoped to the current fund.
   depPeriod: null,   // chosen period for Monthly Depreciation view
   reconPeriod: null, // chosen period for Reconciliation view
   reconDraft: "",    // unsaved Trial Balance text (pasted or uploaded) not yet tied to a saved period
@@ -433,7 +440,15 @@ function lastPostedPeriod(fund) {
   postingsForFund(fund).forEach(d => { if (!last || cmpPeriod(d.period, last) > 0) last = d.period; });
   return last;
 }
-function activeAssets(fund) { return [...S.assets.values()].filter(a => a.status === "active" && (a.fund || "GF") === fund); }
+/** All active assets currently attributed to `fund`. Pass `period` (a "YYYY-MM" string) to instead
+ *  attribute each asset to whichever fund applied AS OF that period — via `fundAsOf()` — so a Trust
+ *  Fund → General Fund transfer (see `transferAsset`) only moves an item's Reconciliation footprint
+ *  from the transfer date forward; a period before the transfer still finds the item under its old
+ *  fund. Every other view (Register, Reports, Dashboard, Retired, CSV exports, ...) calls this with
+ *  no `period` and keeps showing the asset under its CURRENT fund, same as before this feature. */
+function activeAssets(fund, period) {
+  return [...S.assets.values()].filter(a => a.status === "active" && (period ? fundAsOf(a, period) === fund : (a.fund || "GF") === fund));
+}
 function depreciableActiveAssets(fund) { return activeAssets(fund).filter(a => a.depreciable); }
 
 /* ---------- CIP (Construction in Progress) engine ----------
@@ -504,9 +519,21 @@ function accountCodeAsOf(asset, period) {
   sorted.forEach(c => { if ((c.date || "").slice(0, 7) <= period) code = c.new_code; });
   return code;
 }
+/** Mirrors `accountCodeAsOf` — walks an asset's `fund_changes` history (see `transferAsset`'s
+ *  Trust Fund → General Fund transfer option) to determine which fund it belonged to as of a given
+ *  period, so a fund transfer only moves the item's Reconciliation footprint from the transfer date
+ *  forward. Falls back to the asset's current `fund` when it has never been fund-transferred. */
+function fundAsOf(asset, period) {
+  const changes = asset && asset.fund_changes;
+  if (!changes || !changes.length) return asset ? (asset.fund || "GF") : null;
+  const sorted = [...changes].sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+  let fund = sorted[0].old_fund;
+  sorted.forEach(c => { if ((c.date || "").slice(0, 7) <= period) fund = c.new_fund; });
+  return fund;
+}
 function distinctCostAccounts(fund, period) {
   const map = new Map();
-  activeAssets(fund).forEach(a => {
+  activeAssets(fund, period).forEach(a => {
     const code = period ? accountCodeAsOf(a, period) : a.account_code;
     if (code && !map.has(code)) map.set(code, accountInfo(code).name);
   });
@@ -514,12 +541,12 @@ function distinctCostAccounts(fund, period) {
   return [...map.entries()].sort((a, b) => a[0] - b[0]).map(([code, name]) => ({ code, name }));
 }
 function registryCostFor(code, fund, period) {
-  const assetCost = round2(activeAssets(fund).filter(a => (period ? accountCodeAsOf(a, period) : a.account_code) === code).reduce((s, a) => s + (a.cost || 0), 0));
+  const assetCost = round2(activeAssets(fund, period).filter(a => (period ? accountCodeAsOf(a, period) : a.account_code) === code).reduce((s, a) => s + (a.cost || 0), 0));
   const cipCost = round2(activeCipProjects(fund).filter(p => p.account_code === code).reduce((s, p) => s + cipProjectTotal(p), 0));
   return round2(assetCost + cipCost);
 }
 function registryADFor(code, period, fund) {
-  return round2(activeAssets(fund).filter(a => accountCodeAsOf(a, period) === code && a.depreciable)
+  return round2(activeAssets(fund, period).filter(a => accountCodeAsOf(a, period) === code && a.depreciable)
     .reduce((s, a) => s + accumDeprAsOf(a, period), 0));
 }
 /** Build the full variance table for a chosen fund+period against that fund's tb_snapshot doc (or null). */
@@ -630,6 +657,10 @@ function initDb() {
       snap => { S.swaRecords.clear(); snap.docs.forEach(d => S.swaRecords.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
       err => console.error(err)
     );
+    db.collection("history_of_repair").onSnapshot(
+      snap => { S.historyOfRepair.clear(); snap.docs.forEach(d => S.historyOfRepair.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
+      err => console.error(err)
+    );
     db.collection("user_roles").onSnapshot(
       snap => { S.userRoles.clear(); snap.docs.forEach(d => S.userRoles.set(d.id, { id: d.id, ...d.data() })); renderAll(); },
       err => console.error(err)
@@ -650,10 +681,74 @@ function setSync(live, msg) {
 /* ============================================================
    RENDER: Dashboard
    ============================================================ */
+/** Dashboard's global search — one box that reaches across the Asset Register, PAR/ICS, PTR/ITR,
+ *  and History of Repair, all scoped to the current fund. Each section is capped at 20 results
+ *  (this is a "find it and jump there" box, not a report) and every row link reuses that record's
+ *  own existing open/print handler, so clicking a hit behaves exactly like clicking it from its
+ *  home tab. */
+function dashboardSearchMatches(q) {
+  const query = (q || "").trim().toLowerCase();
+  if (!query) return null;
+  const fund = S.currentFund;
+  const has = (vals) => vals.some(v => v != null && String(v).toLowerCase().includes(query));
+  const assets = [...S.assets.values()]
+    .filter(a => (a.fund || "GF") === fund)
+    .filter(a => has([a.property_id, a.sen, a.description, a.location, a.accountable_officer, a.account_name]))
+    .slice(0, 20);
+  const parics = parIcsInFund(fund)
+    .filter(r => has([r.number, r.description, r.dept_office, r.entity_name, r.property_number, r.item_no]))
+    .slice(0, 20);
+  const ptritr = ptrItrInFund(fund)
+    .filter(r => has([r.number, r.description, r.property_no, r.sen, r.from_location, r.to_location, r.reason]))
+    .slice(0, 20);
+  const hor = horRowsInFund(fund)
+    .filter(r => has([r.job_order_no, r.property_no, r.make_model, r.plate_no, r.unit_serial_no, r.engine_serial_no, r.supplier]))
+    .slice(0, 20);
+  return { assets, parics, ptritr, hor };
+}
+function dashboardSearchResultsHtml(q) {
+  const m = dashboardSearchMatches(q);
+  if (!m) return "";
+  const totalHits = m.assets.length + m.parics.length + m.ptritr.length + m.hor.length;
+  if (!totalHits) return `<div class="panel"><div class="panel-body"><div class="empty">No matches for "${esc(q)}" in this fund's Asset Register, PAR/ICS, PTR/ITR, or History of Repair.</div></div></div>`;
+  const section = (title, rows, rowHtml) => rows.length ? `
+    <div class="panel">
+      <div class="panel-head"><div><h3>${esc(title)} (${rows.length})</h3></div></div>
+      <div class="panel-body flush"><div class="tablewrap"><table><tbody>${rows.map(rowHtml).join("")}</tbody></table></div></div>
+    </div>` : "";
+  return `
+    <div class="banner info" style="margin-bottom:14px;">${totalHits} match(es) for "${esc(q)}" in ${fundLabel(S.currentFund)}.</div>
+    ${section("Asset Register", m.assets, a => `<tr>
+      <td class="mono" style="width:110px;">${esc(a.property_id || a.sen) || "—"}</td>
+      <td class="truncate" title="${esc(a.description)}">${esc(a.description) || "—"}</td>
+      <td>${esc(a.location) || "—"}</td>
+      <td><a href="#" onclick="openAssetDetail('${a.id}');return false;">open →</a></td>
+    </tr>`)}
+    ${section("PAR / ICS", m.parics, r => `<tr>
+      <td class="mono" style="width:150px;">${esc(r.number)}</td>
+      <td class="truncate" title="${esc(r.description)}">${esc(r.description) || "—"}</td>
+      <td>${r.recorded ? '<span class="pill good">Recorded</span>' : '<span class="pill warn">Pending</span>'}</td>
+      <td><a href="#" onclick="setView('parics');return false;">open PAR/ICS →</a></td>
+    </tr>`)}
+    ${section("PTR / ITR", m.ptritr, r => `<tr>
+      <td class="mono" style="width:150px;">${esc(r.number)}</td>
+      <td class="truncate" title="${esc(r.description)}">${esc(r.description) || "—"}</td>
+      <td>${esc(r.from_location) || "—"} → ${esc(r.to_location) || "—"}</td>
+      <td><a href="#" onclick="setView('ptritr');return false;">open PTR/ITR →</a></td>
+    </tr>`)}
+    ${section("History of Repair", m.hor, r => `<tr>
+      <td class="mono" style="width:150px;">${esc(r.job_order_no) || "—"}</td>
+      <td>${fmtDateShort(r.job_order_date || r.date)}</td>
+      <td class="truncate">${esc(r.supplier) || "—"}</td>
+      <td><a href="#" onclick="printHor('${r.id}');return false;">print →</a> · <a href="#" onclick="setView('hor');return false;">open History of Repair →</a></td>
+    </tr>`)}
+  `;
+}
 function renderDashboard() {
   const el = document.getElementById("view-dashboard");
   if (!hasTabAccess("dashboard")) { el.innerHTML = restrictedBlock(); return; }
   if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const focus = captureFocus("view-dashboard");
   const fund = S.currentFund;
   const active = activeAssets(fund);
   const ppeActive = active.filter(a => itemTypeOf(a) === "ppe");
@@ -702,6 +797,12 @@ function renderDashboard() {
   const okCount = recon.filter(r => r.hasTb && r.ok).length;
 
   el.innerHTML = `
+    <div class="panel">
+      <div class="toolbar">
+        <input type="text" class="grow" id="dashSearch" placeholder="Search the Asset Register, PAR/ICS, PTR/ITR, and History of Repair…" value="${esc(S.dashboardSearch)}">
+      </div>
+    </div>
+    <div id="dashSearchResults">${dashboardSearchResultsHtml(S.dashboardSearch)}</div>
     <div class="cardrow">
       <div class="card"><div class="label">PPE Total Cost</div><div class="value">${fmtMoney(ppeCost)}</div><div class="foot">${ppeActive.length} active PPE item(s)</div></div>
       <div class="card"><div class="label">Semi-Expendable Total Cost</div><div class="value">${fmtMoney(sxCost)}</div><div class="foot">${sxActive.length} active item(s)</div></div>
@@ -772,6 +873,14 @@ function renderDashboard() {
       </table></div></div>
     </div>
   `;
+  // Re-render just the results panel on each keystroke rather than the whole dashboard (which
+  // would rebuild every stat/panel above on every character) — same reasoning as the register/
+  // reports search boxes, just scoped even tighter since only one child div needs to change.
+  document.getElementById("dashSearch").addEventListener("input", e => {
+    S.dashboardSearch = e.target.value;
+    document.getElementById("dashSearchResults").innerHTML = dashboardSearchResultsHtml(S.dashboardSearch);
+  });
+  restoreFocus(focus);
 }
 function loadingBlock() {
   return `<div class="empty"><div class="big">⋯</div>Loading the shared PPE register&hellip;</div>`;
@@ -837,6 +946,7 @@ function renderRegister() {
         ${canEdit("register") ? `
         <button class="btn" onclick="openBulkAddModal()">Bulk add PPE (paste)</button>
         <button class="btn" onclick="openSxBulkAddModal()">Bulk add Semi-Expendable (paste)</button>
+        <button class="btn" onclick="openRoadBulkImportModal()">Bulk import Road Network (paste)</button>
         <button class="btn primary" onclick="openAssetModal()">+ Add item</button>` : ""}
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
@@ -1003,7 +1113,7 @@ function openAssetModal(existingId, initialType, prefill) {
       <div id="f_block_ppe_cost">
         <div class="fieldrow3">
           <div class="field"><label>Cost (Php)</label><input type="number" step="0.01" id="f_cost" value="${a && itemType === "ppe" ? a.cost : (pf.cost != null ? pf.cost : "")}"></div>
-          <div class="field"><label>5% Residual value (Php)</label><input type="number" step="0.01" id="f_residual" value="${a && itemType === "ppe" ? a.residual_value : ""}"></div>
+          <div class="field"><label>5% Residual value (Php)</label><input type="number" step="0.01" id="f_residual" value="${a && itemType === "ppe" ? a.residual_value : (pf.residual_value != null ? pf.residual_value : "")}"></div>
           <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="f_life" value="${a && itemType === "ppe" ? a.useful_life_years : ""}"></div>
         </div>
         <div class="field" id="f_baselinead_wrap">
@@ -1321,7 +1431,7 @@ function openAssetDetail(id) {
         <dt>Detail</dt><dd>${esc(a.retire_detail) || "—"}</dd>
         <dt>Reference</dt><dd>${esc(a.retire_reference) || "—"}</dd>
       </div>` : ""}
-      ${isSx && a.ledger_entries && a.ledger_entries.length ? `
+      ${a.ledger_entries && a.ledger_entries.length ? `
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
       <label style="margin-bottom:6px;">Ledger history</label>
       <div class="kv" style="font-size:12.5px;grid-template-columns:110px 1fr;">
@@ -1553,6 +1663,10 @@ function openTransferModal(id) {
           <select id="tr_account">${isSx ? sxAccountCategoryOptions(a.account_code) : assetCategoryOptions(a.account_code)}</select>
           <p class="subtle" style="font-size:11.5px;margin:4px 0 0;">Reconciliation keeps showing this item under its current account for periods already posted before the effective date above — only this period and later use the new account.</p>
         </div>
+        ${fund === "TF" ? `
+        <div style="margin-top:8px;"><label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;font-size:12.5px;"><input type="checkbox" id="tr_fundtransfer"> Also transfer this item from Trust Fund to General Fund</label></div>
+        <p id="tr_fundtransfer_note" class="subtle" style="font-size:11.5px;margin:4px 0 0;display:none;">The item moves to the General Fund register effective the date above — periods before that date still show it under Trust Fund in Reconciliation, not backdated to its acquisition date.</p>
+        ` : ""}
       </div>
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
       <p class="subtle" style="font-size:12px;margin-top:0;">Signatories for the printed ${label} (optional — can also be filled in later from Edit)</p>
@@ -1586,6 +1700,10 @@ function openTransferModal(id) {
   document.getElementById("tr_reclassify").addEventListener("change", e => {
     document.getElementById("tr_reclassify_field").style.display = e.target.checked ? "" : "none";
   });
+  const fundTransferCb = document.getElementById("tr_fundtransfer");
+  if (fundTransferCb) fundTransferCb.addEventListener("change", e => {
+    document.getElementById("tr_fundtransfer_note").style.display = e.target.checked ? "" : "none";
+  });
 }
 
 async function transferAsset(id) {
@@ -1603,8 +1721,12 @@ async function transferAsset(id) {
   const reclassify = document.getElementById("tr_reclassify").checked;
   const newAccountCode = reclassify ? Number(document.getElementById("tr_account").value) : null;
   const isReclassifying = reclassify && newAccountCode && newAccountCode !== a.account_code;
-  if (!newLocation && !newOfficer && !isReclassifying) return toast("Enter a new location or accountable officer, or check “Also change this item’s Account Code / Name” and pick a new account.");
-  if (newLocation === (a.location || "") && newOfficer === (a.accountable_officer || "") && !isReclassifying) return toast("No change to save.");
+  // Item 4 (Sept 2026): Trust Fund → General Fund only — the checkbox only exists in the modal when
+  // the asset's current fund is TF (see openTransferModal), so no other fund pairing is reachable here.
+  const fundTransferCb = document.getElementById("tr_fundtransfer");
+  const isFundTransferring = !!(fundTransferCb && fundTransferCb.checked && fund === "TF");
+  if (!newLocation && !newOfficer && !isReclassifying && !isFundTransferring) return toast("Enter a new location or accountable officer, or check “Also change this item’s Account Code / Name” / “Also transfer this item from Trust Fund to General Fund”.");
+  if (newLocation === (a.location || "") && newOfficer === (a.accountable_officer || "") && !isReclassifying && !isFundTransferring) return toast("No change to save.");
   if (reclassify && !newAccountCode) return toast("Pick the new account code, or uncheck “Also change this item’s Account Code / Name”.");
   const enteredNumber = document.getElementById("tr_number").value.trim();
   const number = enteredNumber || (isSx ? nextItrNumber(fund, date) : nextPtrNumber(fund, date));
@@ -1632,9 +1754,19 @@ async function transferAsset(id) {
     new_code: newAccountCode, new_name: accountInfo(newAccountCode).name,
     by: viewerLabel(), at: new Date().toISOString(),
   } : null;
-  const reasonForPrint = accountChangeEntry
-    ? [reason, `Account reclassified to ${accountChangeEntry.new_code} — ${accountChangeEntry.new_name}.`].filter(Boolean).join(" ")
-    : reason;
+  // Item 4: Trust Fund → General Fund transfer, same dated-history pattern as account
+  // reclassification above — fundAsOf() lets Reconciliation for a period before this transfer's
+  // date keep attributing the item to Trust Fund, while this period and later attribute it to
+  // General Fund. The item's Register/Reports/Dashboard appearance (which always shows its CURRENT
+  // fund) moves to General Fund immediately, with no backdating to its original acquisition date.
+  const fundChangeEntry = isFundTransferring ? {
+    date, old_fund: "TF", new_fund: "GF", by: viewerLabel(), at: new Date().toISOString(),
+  } : null;
+  const reasonForPrint = [
+    reason,
+    accountChangeEntry ? `Account reclassified to ${accountChangeEntry.new_code} — ${accountChangeEntry.new_name}.` : "",
+    fundChangeEntry ? `Transferred from Trust Fund to General Fund.` : "",
+  ].filter(Boolean).join(" ");
   const ptrItrRec = {
     doc_type: docType, fund, number, date, asset_id: id, transfer_entry_id: entryId,
     property_no: a.property_id || "", sen: a.sen || "", date_acquired: a.date_acquired || "",
@@ -1667,6 +1799,12 @@ async function transferAsset(id) {
       account_changes: [...(a.account_changes || []), accountChangeEntry],
     });
   }
+  if (fundChangeEntry) {
+    Object.assign(assetUpdate, {
+      fund: fundChangeEntry.new_fund,
+      fund_changes: [...(a.fund_changes || []), fundChangeEntry],
+    });
+  }
   if (isDonation) {
     Object.assign(assetUpdate, {
       status: "retired", retired_at: date + "T00:00:00.000Z", retired_by: viewerLabel(),
@@ -1679,9 +1817,10 @@ async function transferAsset(id) {
     await S.db.collection("assets").doc(id).update(assetUpdate);
     await S.db.collection("ptr_itr").add(ptrItrRec);
     const reclassNote = accountChangeEntry ? ` Account reclassified to ${accountChangeEntry.new_code} — ${accountChangeEntry.new_name}, effective this period.` : "";
+    const fundNote = fundChangeEntry ? ` Moved to General Fund, effective this period — Reconciliation for earlier periods still shows it under Trust Fund.` : "";
     toast((isDonation
       ? `Transfer saved — ${docType.toUpperCase()} ${number} generated, and the item was retired (Donated out).`
-      : `Transfer saved — ${docType.toUpperCase()} ${number} generated.`) + reclassNote);
+      : `Transfer saved — ${docType.toUpperCase()} ${number} generated.`) + reclassNote + fundNote);
     closeModal();
   } catch (e) { console.error(e); toast("Couldn't save — try again."); }
 }
@@ -1774,6 +1913,96 @@ async function submitBulkAdd() {
     added++;
   }
   toast(`${added} PPE asset(s) added to ${fundLabel(S.currentFund)}.`);
+  closeModal();
+}
+
+/* ---------- Road Network bulk import (item 9, Sept 2026) ----------
+   One row per Road Network — the client's own source ledger keeps Road Lot (land, never
+   depreciated) and Pavement (the depreciable structure) as separate cost layers under the same
+   10703010 account, sometimes across many historical billing rows per road. This importer expects
+   ONE already-aggregated row per road (road_lot_value = that road's total land cost, pavement_cost
+   = that road's total pavement/concreting cost, accum_depr_baseline_pavement = the pavement
+   portion's accumulated depreciation as of this registry's baseline period) — aggregating many
+   historical billing rows for the same road into one row is done before pasting here, the same
+   simplification already used for CIP/SEF/Trust Fund historical bulk imports elsewhere in this app.
+   See roadComponentAmounts() above for how the Road Lot / Pavement split still shows on the printed
+   Ledger/Property Card despite there being only one Cost/Accumulated Depreciation schedule. */
+function openRoadBulkImportModal() {
+  openModal(`
+    <div class="modal-head"><h3>Bulk import Road Network</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p class="subtle">These will be added as <b>PPE</b> (account 10703010 — Road Networks) to <b>${esc(fundLabel(S.currentFund))}</b> — switch funds in the sidebar first if that's not right. One row per road — if your source ledger has separate historical billing rows per road, add up their costs into a single Pavement figure (and Road Lot value) before pasting.</p>
+      <p class="subtle">Upload a CSV file, or paste rows — one road per line, columns in this order:</p>
+      <p class="mono subtle" style="font-size:10.5px;">road_id_no, road_name, road_type, location, road_length_meters, date_acquired (YYYY-MM-DD), road_lot_value, pavement_cost, useful_life_years, accum_depr_baseline_pavement (optional), property_id (optional)</p>
+      <p class="subtle" style="font-size:12px;">Road Lot value is never depreciated — it's folded into the item's residual value so the schedule only depreciates the Pavement figure, matching how the source ledger already treats land under the road. "accum_depr_baseline_pavement" is the Pavement portion's own accumulated depreciation as of ${esc(periodLabel(BASELINE_PERIOD))} — leave it off for a road with no depreciation history yet.</p>
+      <div class="field" style="margin-top:10px;">
+        <label>CSV file</label>
+        <input type="file" id="roadBulkFile" accept=".csv,text/csv">
+      </div>
+      <p class="subtle" style="font-size:12px;margin:10px 0 6px;">— or paste directly —</p>
+      <div class="field"><textarea id="roadBulkPaste" rows="7"></textarea></div>
+      <div id="roadBulkPreview" class="subtle" style="font-size:12px;"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="submitRoadBulkImport()">Import all</button>
+    </div>
+  `);
+  const textarea = document.getElementById("roadBulkPaste");
+  const preview = () => {
+    const rows = parseRoadBulkRows(textarea.value);
+    document.getElementById("roadBulkPreview").textContent = rows.length ? `${rows.length} road(s) recognized.` : textarea.value.trim() ? "No valid rows recognized yet." : "";
+  };
+  textarea.addEventListener("input", preview);
+  document.getElementById("roadBulkFile").addEventListener("change", e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      let text = String(reader.result || "");
+      if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+      textarea.value = text;
+      preview();
+      toast(`Loaded ${file.name}.`);
+    };
+    reader.onerror = () => toast("Couldn't read that file.");
+    reader.readAsText(file);
+  });
+}
+function parseRoadBulkRows(text) {
+  return text.split(/\r?\n/).map(l => l.trim()).filter(Boolean).map(line => {
+    return line.includes("\t") ? line.split("\t").map(c => c.trim()) : parseCsvLine(line);
+  }).filter(cols => cols.length >= 8 && cols[0] && cols[1]);
+}
+async function submitRoadBulkImport() {
+  if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("register")) return;
+  const rows = parseRoadBulkRows(document.getElementById("roadBulkPaste").value);
+  if (!rows.length) return toast("No valid rows found.");
+  const info = accountInfo(10703010);
+  let added = 0;
+  for (const cols of rows) {
+    const [roadId, roadName, roadType, location, lengthM, date, roadLot, pavement, life, baselineAd, propid] = cols;
+    const roadLotValue = round2(Number(roadLot) || 0);
+    const pavementValue = round2(Number(pavement) || 0);
+    const total = round2(roadLotValue + pavementValue);
+    if (total <= 0) continue;
+    await S.db.collection("assets").add({
+      item_type: "ppe", fund: S.currentFund,
+      account_code: 10703010, account_name: info.name, ad_account_code: 10703011,
+      dep_exp_account_code: info.expCode, dep_exp_account_name: info.expName,
+      property_id: propid || "", road_id_no: roadId || "", road_type: roadType || "",
+      road_length: lengthM || "", date_acquired: parseFlexibleDate(date), description: roadName || "",
+      location: location || "", accountable_officer: "", remarks: "",
+      cost: total, residual_value: round2(roadLotValue + round2(pavementValue * 0.05)),
+      useful_life_years: Number(life) || 15, depreciable: true, status: "active",
+      accum_depr_baseline: round2(Number(baselineAd) || 0),
+      road_lot_value: roadLotValue, road_pavement_value: pavementValue,
+      source_sheet: "Road Network bulk import", updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+    });
+    added++;
+  }
+  toast(`${added} Road Network asset(s) added to ${fundLabel(S.currentFund)}.`);
   closeModal();
 }
 
@@ -2569,12 +2798,13 @@ function openCipCompleteModal(id) {
   const p = S.cipProjects.get(id);
   if (!p) return;
   const total = cipProjectTotal(p);
+  const defaultCode = defaultTransferAccountFor(p.account_code);
   openModal(`
     <div class="modal-head"><h3>Complete CIP project → transfer to PPE</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
       <p style="margin-top:0;">${esc(p.name) || esc(p.cip_code)}</p>
       <p class="subtle" style="font-size:12.5px;">This creates a new PPE asset for the total ${fmtMoney(total)} billed to date, and marks this CIP project completed. This can't be undone from here — check the details below first.</p>
-      <div class="field"><label>New asset category</label><select id="ct_account">${assetCategoryOptions(defaultTransferAccountFor(p.account_code))}</select></div>
+      <div class="field"><label>New asset category</label><select id="ct_account">${assetCategoryOptions(defaultCode)}</select></div>
       <div class="fieldrow">
         <div class="field"><label>Property / Tag No.</label><input id="ct_propid"></div>
         <div class="field"><label>Date completed / transferred</label><input type="date" id="ct_date" value="${new Date().toISOString().slice(0, 10)}"></div>
@@ -2587,12 +2817,37 @@ function openCipCompleteModal(id) {
         <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="ct_life" value="25"></div>
         <div class="field"><label>5% Residual value (Php)</label><input type="number" step="0.01" id="ct_residual" value="${round2(total * 0.05)}"></div>
       </div>
+      <div id="ct_buildings_block" style="display:none;">
+        <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+        <p class="subtle" style="font-size:12.5px;margin-top:0;">This is a Buildings & Structures asset — allocate the ${fmtMoney(total)} total across its components (the printed Ledger/Property Card then shows these figures under each component instead of blank rows). Building auto-fills with whatever's left after the other three.</p>
+        <div class="fieldrow">
+          <div class="field"><label>A. Building (Php)</label><input type="number" step="0.01" id="ct_comp_building" value="${total}"></div>
+          <div class="field"><label>B. Air Conditioning System (Php)</label><input type="number" step="0.01" id="ct_comp_aircon" value="0"></div>
+        </div>
+        <div class="fieldrow">
+          <div class="field"><label>C. Elevators/Escalators (Php)</label><input type="number" step="0.01" id="ct_comp_elevators" value="0"></div>
+          <div class="field"><label>D. Others (specify) (Php)</label><input type="number" step="0.01" id="ct_comp_others" value="0"></div>
+        </div>
+      </div>
     </div>
     <div class="modal-foot">
       <button class="btn ghost" onclick="closeModal()">Cancel</button>
       <button class="btn primary" onclick="completeCipProject('${p.id}')">Confirm — capitalize as PPE</button>
     </div>
   `);
+  const buildingsBlock = document.getElementById("ct_buildings_block");
+  const toggleBuildingsBlock = () => { buildingsBlock.style.display = BUILDINGS_ACCOUNT_CODES.includes(Number(document.getElementById("ct_account").value)) ? "" : "none"; };
+  document.getElementById("ct_account").addEventListener("change", toggleBuildingsBlock);
+  toggleBuildingsBlock();
+  // "Building" auto-absorbs whatever's left after Air Conditioning/Elevators/Others, so the four
+  // components always sum to the total without the user having to do the subtraction by hand.
+  const recomputeBuilding = () => {
+    const aircon = Number(document.getElementById("ct_comp_aircon").value) || 0;
+    const elevators = Number(document.getElementById("ct_comp_elevators").value) || 0;
+    const others = Number(document.getElementById("ct_comp_others").value) || 0;
+    document.getElementById("ct_comp_building").value = round2(Math.max(0, total - aircon - elevators - others));
+  };
+  ["ct_comp_aircon", "ct_comp_elevators", "ct_comp_others"].forEach(id => document.getElementById(id).addEventListener("input", recomputeBuilding));
 }
 async function completeCipProject(id) {
   if (!S.db) return toast("No shared database in this view.");
@@ -2604,6 +2859,16 @@ async function completeCipProject(id) {
   const code = Number(document.getElementById("ct_account").value);
   const info = accountInfo(code);
   const date = document.getElementById("ct_date").value || new Date().toISOString().slice(0, 10);
+  // Item 5 (Sept 2026): for a Buildings & Structures asset, capture the client's chosen cost split
+  // across its 4 components (Building/Air Conditioning/Elevators-Escalators/Others) so the printed
+  // Ledger/Property Card can show real figures for each instead of blank placeholder rows.
+  const isBuildings = BUILDINGS_ACCOUNT_CODES.includes(code);
+  const buildingComponents = isBuildings ? {
+    building: round2(Number(document.getElementById("ct_comp_building").value) || 0),
+    aircon: round2(Number(document.getElementById("ct_comp_aircon").value) || 0),
+    elevators: round2(Number(document.getElementById("ct_comp_elevators").value) || 0),
+    others: round2(Number(document.getElementById("ct_comp_others").value) || 0),
+  } : null;
   try {
     const ref = await S.db.collection("assets").add({
       fund: p.fund || "GF",
@@ -2619,6 +2884,7 @@ async function completeCipProject(id) {
       cost: total, residual_value: round2(Number(document.getElementById("ct_residual").value) || 0),
       useful_life_years: Number(document.getElementById("ct_life").value) || 0,
       depreciable: !!info.depreciable, status: "active", accum_depr_baseline: 0,
+      ...(buildingComponents ? { building_components: buildingComponents } : {}),
       source_sheet: `Transferred from CIP ${p.cip_code || ""}`.trim(),
       updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     });
@@ -3005,6 +3271,325 @@ async function unmatchSwa(id) {
 }
 
 /* ============================================================
+   HISTORY OF REPAIR (HOR) — own collection "history_of_repair" (2026-09).
+   Each saved record is one Job Order's repair against ONE item that must
+   already exist in the Asset Register (PPE or Semi-Expendable) — the item
+   picker below is built ONLY from S.assets, so an item outside the Register
+   can never be selected here (see item #50 of the Sept 2026 batch). Saving
+   a record also mirrors it into that asset's own `ledger_entries[]` as a
+   `{type:"repair"}` entry (tagged with `hor_id` so an edit/delete here can
+   find and replace/remove its own mirrored entry without touching any other
+   ledger entry) — this is the same mechanism Semi-Expendable's "Add ledger
+   entry" already used (see saveSxLedgerEntry), now shared by PPE too via
+   assetEventTimeline()'s repair-event handling. That mirrored entry is what
+   makes the repair show up in the "Ledger history" panel on the asset's own
+   detail view, and in the Repair History / Nature of Maintenance columns on
+   the printed Equipment Ledger Card and the Buildings/Road/Other-Infra
+   component-sectioned cards.
+   ============================================================ */
+function horRowsInFund(fund) { return [...S.historyOfRepair.values()].filter(r => (r.fund || "GF") === fund); }
+function filterHorRows(f) {
+  let rows = horRowsInFund(S.currentFund);
+  if (f.q) {
+    const q = f.q.toLowerCase();
+    rows = rows.filter(r => [r.job_order_no, r.property_no, r.make_model, r.plate_no, r.supplier]
+      .some(v => v && String(v).toLowerCase().includes(q)));
+  }
+  rows.sort((a, b) => (b.job_order_date || b.date || "").localeCompare(a.job_order_date || a.date || ""));
+  return rows;
+}
+function renderHor() {
+  const el = document.getElementById("view-hor");
+  if (!el) return; // older index.html without the History of Repair nav tab/container — nothing to render into
+  if (!hasTabAccess("hor")) { el.innerHTML = restrictedBlock(); return; }
+  if (!S.ready) { el.innerHTML = loadingBlock(); return; }
+  const focus = captureFocus("view-hor");
+  const f = S.horFilter;
+  const rows = filterHorRows(f);
+  el.innerHTML = `
+    <div class="banner info" style="margin-bottom:14px;">Log a repair Job Order against an item already in the Asset Register — only items already in the Register can be picked below. Saving adds a <b>Repair</b> entry to that item's own ledger, which prints on its Ledger Card.</div>
+    <div class="panel">
+      <div class="toolbar">
+        <input type="text" class="grow" id="horSearch" placeholder="Search Job Order No., property no., make/model, plate no., supplier…" value="${esc(f.q)}">
+        <span style="flex:1"></span>
+        ${canEdit("hor") ? `<button class="btn primary" onclick="openHorModal()">+ New Repair Record</button>` : ""}
+      </div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>Job Order No.</th><th>Date</th><th>Asset (Property/SEN)</th><th>Description</th><th>Supplier</th><th class="num">Total Cost</th><th style="width:180px;">Actions</th></tr></thead>
+        <tbody>${rows.length ? rows.map(r => {
+          const a = S.assets.get(r.asset_id);
+          return `<tr>
+            <td class="mono">${esc(r.job_order_no) || "—"}</td>
+            <td class="mono">${fmtDateShort(r.job_order_date || r.date)}</td>
+            <td class="mono">${esc(r.property_no) || (a ? esc(a.property_id || a.sen) : "—") || "—"}</td>
+            <td class="truncate" title="${esc(a ? a.description : "")}">${esc(a ? a.description : "") || "—"}</td>
+            <td class="truncate">${esc(r.supplier) || "—"}</td>
+            <td class="num mono">${fmtMoney(r.total_cost)}</td>
+            <td>
+              <button class="btn small" style="margin-right:4px;" onclick="printHor('${r.id}')">Print</button>
+              ${a ? `<a href="#" onclick="openAssetDetail('${a.id}');return false;" style="font-size:11px;margin-right:8px;">view item</a>` : `<span class="subtle" style="font-size:11px;margin-right:8px;">item removed</span>`}
+              ${canEdit("hor") ? `<button class="btn small" style="margin-right:4px;" onclick="openHorModal('${r.id}')">Edit</button>
+                 <button class="btn small danger" onclick="deleteHorRecord('${r.id}')">Delete</button>` : ""}
+            </td>
+          </tr>`;
+        }).join("") : `<tr><td colspan="7"><div class="empty">No repair records logged yet.</div></td></tr>`}
+        </tbody>
+      </table></div></div>
+    </div>
+  `;
+  document.getElementById("horSearch").addEventListener("input", e => { S.horFilter.q = e.target.value; renderHor(); });
+  restoreFocus(focus);
+}
+/** Builds the "Item to repair" <select> options from the current fund's Asset Register ONLY
+ *  (active items, PPE and Semi-Expendable together) — the sole enforcement point for "only items
+ *  in the Asset Registry are allowed" (item #50): since nothing outside this list is selectable,
+ *  saveHorRecord()'s own `if (!asset) return toast(...)` guard is defense-in-depth, not the only
+ *  check. */
+function horAssetOptions(selectedId) {
+  const rows = activeAssets(S.currentFund).slice().sort((a, b) => (a.property_id || a.sen || "").localeCompare(b.property_id || b.sen || ""));
+  return `<option value="">— Select item from Asset Register —</option>` + rows.map(a =>
+    `<option value="${a.id}" ${a.id === selectedId ? "selected" : ""}>${esc(a.property_id || a.sen || a.id)} — ${esc(a.description)}</option>`).join("");
+}
+function horSparepartRowHtml(line) {
+  line = line || {};
+  return `<tr>
+    <td><input type="number" step="1" min="0" class="h_sp_qty" style="width:100%;" value="${line.qty != null && line.qty !== "" ? line.qty : ""}"></td>
+    <td><input class="h_sp_unit" style="width:100%;" value="${esc(line.unit || "")}"></td>
+    <td><input class="h_sp_desc" style="width:100%;" value="${esc(line.description || "")}" placeholder="Spare parts / materials and labor"></td>
+    <td><input type="number" step="0.01" class="h_sp_cost" style="width:100%;" value="${line.cost != null && line.cost !== "" ? line.cost : ""}"></td>
+    <td><input class="h_sp_remarks" style="width:100%;" value="${esc(line.remarks || "")}"></td>
+    <td><button type="button" class="btn small ghost" onclick="this.closest('tr').remove()">✕</button></td>
+  </tr>`;
+}
+function addHorSparepartLine() {
+  const body = document.getElementById("h_sp_body");
+  if (body) body.insertAdjacentHTML("beforeend", horSparepartRowHtml());
+}
+function openHorModal(existingId) {
+  const r = existingId ? S.historyOfRepair.get(existingId) : null;
+  if (existingId && !r) return;
+  const a = r ? S.assets.get(r.asset_id) : null;
+  const lines = r && r.spareparts && r.spareparts.length ? r.spareparts : [{}];
+  const today = new Date().toISOString().slice(0, 10);
+  openModal(`
+    <div class="modal-head"><h3>${r ? "Edit Repair Record" : "New Repair Record"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <div class="field"><label>Item to repair (must already be in the Asset Register)</label>
+        <select id="h_asset">${horAssetOptions(r ? r.asset_id : "")}</select>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Make &amp; Model</label><input id="h_make_model" value="${esc(r ? r.make_model : "")}"></div>
+        <div class="field"><label>Unit/Serial No.</label><input id="h_unit_serial" value="${esc(r ? r.unit_serial_no : "")}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Engine Serial No.</label><input id="h_engine_serial" value="${esc(r ? r.engine_serial_no : "")}"></div>
+        <div class="field"><label>Plate No.</label><input id="h_plate_no" value="${esc(r ? r.plate_no : "")}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Property No.</label><input id="h_property_no" value="${esc(r ? r.property_no : (a ? (a.property_id || a.sen || "") : ""))}"></div>
+        <div class="field"><label>Date</label><input type="date" id="h_date" value="${r ? r.date : today}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>End User</label><input id="h_end_user" value="${esc(r ? r.end_user : (a ? (a.accountable_officer || "") : ""))}"></div>
+        <div class="field"><label>Designation</label><input id="h_designation" value="${esc(r ? r.designation : "")}"></div>
+      </div>
+      <div class="field"><label>Office</label><input id="h_office" value="${esc(r ? r.office : (a ? (a.location || "") : ""))}"></div>
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <div class="fieldrow">
+        <div class="field"><label>Job Order No.</label><input id="h_jo_no" value="${esc(r ? r.job_order_no : "")}"></div>
+        <div class="field"><label>Job Order Date</label><input type="date" id="h_jo_date" value="${r ? r.job_order_date : today}"></div>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Invoice/PO No.</label><input id="h_inv_no" value="${esc(r ? r.invoice_po_no : "")}"></div>
+        <div class="field"><label>Invoice/PO Date</label><input type="date" id="h_inv_date" value="${r ? (r.invoice_po_date || "") : ""}"></div>
+      </div>
+      <div class="field"><label>Supplier</label><input id="h_supplier" value="${esc(r ? r.supplier : "")}"></div>
+      <div class="field">
+        <label>Spare parts / Materials &amp; Labor</label>
+        <div class="tablewrap"><table>
+          <thead><tr><th style="width:70px;">Qty</th><th style="width:80px;">Unit</th><th>Materials/Labor</th><th style="width:110px;">Cost</th><th style="width:120px;">Remarks</th><th></th></tr></thead>
+          <tbody id="h_sp_body">${lines.map(horSparepartRowHtml).join("")}</tbody>
+        </table></div>
+        <button type="button" class="btn small" style="margin-top:6px;" onclick="addHorSparepartLine()">+ Add line</button>
+      </div>
+      <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
+      <div class="fieldrow">
+        <div class="field"><label>Prepared by</label><input id="h_prepared_by" value="${esc(r ? r.prepared_by : "Motorpool Coordinator - Designate")}"></div>
+        <div class="field"><label>Verified by</label><input id="h_verified_by" value="${esc(r ? r.verified_by : "Inspection Incharge")}"></div>
+        <div class="field"><label>Noted by</label><input id="h_noted_by" value="${esc(r ? r.noted_by : "Municipal Mayor")}"></div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="saveHorRecord(${r ? `'${r.id}'` : "null"})">${r ? "Save changes" : "Save Repair Record"}</button>
+    </div>
+  `, "wide");
+}
+async function saveHorRecord(existingId) {
+  if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("hor")) return;
+  const existing = existingId ? S.historyOfRepair.get(existingId) : null;
+  const assetId = document.getElementById("h_asset").value;
+  const asset = assetId ? S.assets.get(assetId) : null;
+  // The <select> is populated ONLY from the Asset Register (see horAssetOptions), so reaching
+  // here with no match means nothing was picked — either way, refuse rather than save an orphan.
+  if (!asset) return toast("Select an item already in the Asset Register — items not in the Register can't be repaired here.");
+  const qtys = [...document.querySelectorAll("#h_sp_body .h_sp_qty")];
+  const units = [...document.querySelectorAll("#h_sp_body .h_sp_unit")];
+  const descs = [...document.querySelectorAll("#h_sp_body .h_sp_desc")];
+  const costs = [...document.querySelectorAll("#h_sp_body .h_sp_cost")];
+  const remarksEls = [...document.querySelectorAll("#h_sp_body .h_sp_remarks")];
+  const spareparts = [];
+  for (let i = 0; i < descs.length; i++) {
+    const description = descs[i].value.trim();
+    const cost = round2(Number(costs[i].value) || 0);
+    const qty = Number(qtys[i].value) || 0;
+    if (!description && !cost && !qty) continue; // skip a fully-blank line row
+    spareparts.push({ qty, unit: units[i].value.trim(), description, cost, remarks: remarksEls[i].value.trim() });
+  }
+  const totalCost = round2(spareparts.reduce((s, l) => s + (l.cost || 0), 0));
+  const jobOrderNo = document.getElementById("h_jo_no").value.trim();
+  const jobOrderDate = document.getElementById("h_jo_date").value || new Date().toISOString().slice(0, 10);
+  const rec = {
+    fund: asset.fund || "GF", asset_id: assetId,
+    make_model: document.getElementById("h_make_model").value.trim(),
+    unit_serial_no: document.getElementById("h_unit_serial").value.trim(),
+    engine_serial_no: document.getElementById("h_engine_serial").value.trim(),
+    plate_no: document.getElementById("h_plate_no").value.trim(),
+    property_no: document.getElementById("h_property_no").value.trim(),
+    date: document.getElementById("h_date").value || new Date().toISOString().slice(0, 10),
+    end_user: document.getElementById("h_end_user").value.trim(),
+    designation: document.getElementById("h_designation").value.trim(),
+    office: document.getElementById("h_office").value.trim(),
+    job_order_no: jobOrderNo,
+    job_order_date: jobOrderDate,
+    invoice_po_no: document.getElementById("h_inv_no").value.trim(),
+    invoice_po_date: document.getElementById("h_inv_date").value || "",
+    supplier: document.getElementById("h_supplier").value.trim(),
+    spareparts, total_cost: totalCost,
+    prepared_by: document.getElementById("h_prepared_by").value.trim(),
+    verified_by: document.getElementById("h_verified_by").value.trim(),
+    noted_by: document.getElementById("h_noted_by").value.trim(),
+    updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+  };
+  let id = existingId;
+  try {
+    if (existingId) {
+      await S.db.collection("history_of_repair").doc(existingId).update(rec);
+    } else {
+      rec.created_by = viewerLabel(); rec.created_at = new Date().toISOString();
+      const ref = await S.db.collection("history_of_repair").add(rec);
+      id = ref.id;
+    }
+    // Mirror this repair into the linked asset's own ledger_entries[] (same mechanism as Semi-
+    // Expendable's "Add ledger entry" — see saveSxLedgerEntry) so it prints on that asset's Ledger/
+    // Property Card via assetEventTimeline(). Tagged with hor_id so editing/deleting this record
+    // finds and replaces/removes only the entry IT created, never another repair's.
+    const sparepartsNote = spareparts.map(l => l.description).filter(Boolean).join("; ");
+    const entry = {
+      type: "repair", date: jobOrderDate, reference: jobOrderNo, amount: totalCost,
+      note: sparepartsNote || "Repair", by: viewerLabel(), at: new Date().toISOString(), hor_id: id,
+    };
+    // If the asset selected changed on an edit, drop this record's old mirrored entry from
+    // whichever asset it used to be on, then add the (possibly updated) entry to the current one.
+    const oldAssetId = existing ? existing.asset_id : null;
+    if (oldAssetId && oldAssetId !== assetId) {
+      const oldAsset = S.assets.get(oldAssetId);
+      if (oldAsset && oldAsset.ledger_entries) {
+        const oldEntries = oldAsset.ledger_entries.filter(e => e.hor_id !== id);
+        await S.db.collection("assets").doc(oldAssetId).update({ ledger_entries: oldEntries, updated_by: viewerLabel() });
+      }
+    }
+    const entries = (asset.ledger_entries || []).filter(e => e.hor_id !== id);
+    entries.push(entry);
+    await S.db.collection("assets").doc(assetId).update({ ledger_entries: entries, updated_by: viewerLabel() });
+    toast(existingId ? "Repair record updated." : "Repair record saved.");
+    closeModal();
+  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+}
+async function deleteHorRecord(id) {
+  if (blockIfViewOnly("hor")) return;
+  const r = S.historyOfRepair.get(id);
+  if (!r) return;
+  if (!confirm(`Delete this repair record (Job Order ${r.job_order_no || "—"})? This can't be undone.`)) return;
+  await S.db.collection("history_of_repair").doc(id).delete();
+  const asset = S.assets.get(r.asset_id);
+  if (asset && asset.ledger_entries && asset.ledger_entries.some(e => e.hor_id === id)) {
+    const entries = asset.ledger_entries.filter(e => e.hor_id !== id);
+    await S.db.collection("assets").doc(r.asset_id).update({ ledger_entries: entries, updated_by: viewerLabel() });
+  }
+  toast("Repair record deleted.");
+}
+/** Printed form — same look-and-feel wrapper as parIcsPrintHtml (Times New Roman, .sig footer
+ *  columns), reworked into the Job Order + Spareparts layout from the client's own paper History
+ *  of Repair form (HISTORY_OF_REPAIR.pdf) rather than the PAR/ICS receipt layout. */
+function horHtml(r) {
+  const a = S.assets.get(r.asset_id);
+  const lines = r.spareparts || [];
+  const totalRows = 12;
+  const blankRows = Math.max(0, totalRows - lines.length);
+  return `
+    <div class="form">
+      <div class="head">
+        ${MUNICIPAL_SEAL_DATA_URI ? `<img src="${MUNICIPAL_SEAL_DATA_URI}">` : ""}
+        <h1>MUNICIPAL GOVERNMENT OF CANDONI</h1>
+        <h2>HISTORY OF REPAIR</h2>
+      </div>
+      <div class="fieldrow" style="display:flex;gap:10px;">
+        <div class="infoline" style="flex:1;"><b>Make &amp; Model :</b><span class="val">${esc(r.make_model)}</span></div>
+        <div class="infoline" style="flex:1;"><b>Unit/Serial No. :</b><span class="val">${esc(r.unit_serial_no)}</span></div>
+      </div>
+      <div class="fieldrow" style="display:flex;gap:10px;">
+        <div class="infoline" style="flex:1;"><b>Engine Serial No. :</b><span class="val">${esc(r.engine_serial_no)}</span></div>
+        <div class="infoline" style="flex:1;"><b>Plate No. :</b><span class="val">${esc(r.plate_no)}</span></div>
+      </div>
+      <div class="fieldrow" style="display:flex;gap:10px;">
+        <div class="infoline" style="flex:1;"><b>Property No. :</b><span class="val">${esc(r.property_no) || (a ? esc(a.property_id || a.sen) : "")}</span></div>
+        <div class="infoline" style="flex:1;"><b>Date :</b><span class="val">${fmtDateShort(r.date)}</span></div>
+      </div>
+      <div class="fieldrow" style="display:flex;gap:10px;">
+        <div class="infoline" style="flex:1;"><b>End User :</b><span class="val">${esc(r.end_user)}</span></div>
+        <div class="infoline" style="flex:1;"><b>Designation :</b><span class="val">${esc(r.designation)}</span></div>
+      </div>
+      <div class="infoline"><b>Office :</b><span class="val">${esc(r.office)}</span></div>
+      <div class="headrow">
+        <div class="infoline" style="flex:1;margin-bottom:0;"><b>Job Order No./Date :</b><span class="val">${esc(r.job_order_no)} — ${fmtDateShort(r.job_order_date)}</span></div>
+        <div style="text-align:right;font-size:11px;"><b>Invoice/PO No./Date:</b> ${esc(r.invoice_po_no) || "—"} ${r.invoice_po_date ? "— " + fmtDateShort(r.invoice_po_date) : ""}<br><b>Supplier:</b> ${esc(r.supplier) || "—"}</div>
+      </div>
+      <table class="pf">
+        <thead><tr><th style="width:8%">Qty</th><th style="width:10%">Unit</th><th style="width:42%">Spare parts / Materials and Labor</th><th style="width:15%">Cost</th><th style="width:25%">Remarks</th></tr></thead>
+        <tbody>
+          ${lines.map(l => `<tr><td class="num">${l.qty || ""}</td><td>${esc(l.unit)}</td><td>${esc(l.description)}</td><td class="num">${fmtNum(l.cost)}</td><td>${esc(l.remarks)}</td></tr>`).join("")}
+          <tr><td colspan="3" style="text-align:right;font-weight:bold;">TOTAL</td><td class="num" style="font-weight:bold;">${fmtNum(r.total_cost)}</td><td></td></tr>
+          ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
+        </tbody>
+      </table>
+      <div class="sig">
+        <div class="col">
+          <div class="who">Prepared by:</div>
+          <div class="pos">${esc(r.prepared_by) || "&nbsp;"}</div>
+          <div class="poscap">Motorpool Coordinator - Designate</div>
+        </div>
+        <div class="col">
+          <div class="who">Verified by:</div>
+          <div class="pos">${esc(r.verified_by) || "&nbsp;"}</div>
+          <div class="poscap">Inspection Incharge</div>
+        </div>
+        <div class="col">
+          <div class="who">Noted by:</div>
+          <div class="pos">${esc(r.noted_by) || "&nbsp;"}</div>
+          <div class="poscap">Municipal Mayor</div>
+        </div>
+      </div>
+    </div>`;
+}
+function printHor(id) {
+  const r = S.historyOfRepair.get(id);
+  if (!r) return;
+  openPrintWindow("History of Repair", parIcsPrintHtml("History of Repair " + (r.job_order_no || ""), horHtml(r)));
+}
+
+/* ============================================================
    ACCESS ROLE — "Users & Roles" (Admin-only tab) + self-service password
    change (any signed-in user). App-level only, by explicit choice — see the
    comment above HARDCODED_ADMIN_EMAILS near the top of this file.
@@ -3012,7 +3597,7 @@ async function unmatchSwa(id) {
 /** Tab keys in the same order they appear in the sidebar — everything a role doc can grant/deny
  *  access to. "users" itself is deliberately excluded — it isn't a permission a role doc can grant;
  *  only isAdmin() (hardcoded email, or a role doc's own is_admin flag) opens it. */
-const PERMISSION_TAB_ORDER = ["dashboard", "reports", "register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "retired"];
+const PERMISSION_TAB_ORDER = ["dashboard", "reports", "register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "hor", "retired"];
 function permissionTabLabel(tabKey) { return (VIEW_TITLES[tabKey] || [tabKey])[0]; }
 /** Short, decision-relevant summary of one role doc's effective access for the Users & Roles list
  *  — spelling out all ten tabs for every row would be noisy, so this calls out only what's NOT
@@ -3253,6 +3838,14 @@ function assetEventTimeline(asset) {
         });
       });
   }
+  // Repair-type ledger entries (added via History of Repair) do not change cost or accumulated
+  // depreciation — they only populate the printed card's Repair History Nature/Amount columns.
+  (asset.ledger_entries || []).filter(e => e.type === "repair").forEach(e => {
+    events.push({
+      date: e.date || "", kind: "repair", label: `Repair${e.reference ? " — " + e.reference : ""}`,
+      reference: e.reference || "", repairNature: e.note || "", repairAmount: round2(Number(e.amount) || 0),
+    });
+  });
   if (asset.status === "retired" && asset.retired_at) {
     events.push({ date: asset.retired_at.slice(0, 10), kind: "retire", label: "Retired / derecognized", reference: "" });
   }
@@ -3348,7 +3941,7 @@ function ledgerCardCardHtml(asset) {
             <td class="num">${asset.depreciable ? fmtNum(r.accumDepr) : ""}</td>
             <td class="num"></td>
             <td class="num">${fmtNum(r.adjustedCost)}</td>
-            <td></td><td class="num"></td><td></td>
+            <td>${r.kind === "repair" ? esc(r.repairNature) : ""}</td><td class="num">${r.kind === "repair" ? fmtNum(r.repairAmount) : ""}</td><td></td>
           </tr>`).join("")}
           ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
         </tbody>
@@ -3497,7 +4090,7 @@ function componentSectionedCardHtml(asset, opts) {
       <td class="num">${asset.depreciable ? fmtNum(r.accumDepr) : ""}</td>
       <td class="num"></td><td class="num"></td>
       <td class="num">${fmtNum(r.adjustedCost)}</td>
-      <td></td><td class="num"></td>
+      <td>${r.kind === "repair" ? esc(r.repairNature) : ""}</td><td class="num">${r.kind === "repair" ? fmtNum(r.repairAmount) : ""}</td>
     </tr>` : `<tr>
       <td></td>
       <td>${fmtDateShort(r.date)}</td><td>${esc(r.reference)}</td>
@@ -3505,15 +4098,35 @@ function componentSectionedCardHtml(asset, opts) {
       <td class="num">${i === 0 ? fmtNum(r.cost) : (r.kind === "revalue" ? fmtNum(r.cost) : "")}</td>
       <td class="num"></td>
       <td class="num">${fmtNum(r.adjustedCost)}</td>
-      <td></td><td class="num"></td>
+      <td>${r.kind === "repair" ? esc(r.repairNature) : ""}</td><td class="num">${r.kind === "repair" ? fmtNum(r.repairAmount) : ""}</td>
     </tr>`;
   const sectionHtml = (label, blankCount, dataHtml) => `
     <tr><td colspan="${colCount}" style="font-weight:bold;background:#eee;">${esc(label)}</td></tr>
     ${dataHtml || ""}
     ${Array.from({ length: blankCount }).map(() => `<tr class="blank">${"<td></td>".repeat(colCount)}</tr>`).join("")}`;
+  // One real row for a non-primary component when its allocated cost is known — e.g. a Buildings
+  // asset completed from CIP with its cost split across components (item 5, Sept 2026). The full
+  // cost/depreciation history stays under the primary component (Building) since this app tracks
+  // one depreciation schedule per asset, not per component; this row is descriptive — how much of
+  // that total went to this component at acquisition — not a second, separately-depreciated ledger.
+  const componentDataRow = (amount) => amount == null ? "" : (isLedger ? `<tr>
+      <td></td><td></td><td>${fmtDateShort(asset.date_acquired)}</td><td></td>
+      <td>Included in acquisition cost above</td><td class="num">${fmtNum(amount)}</td>
+      <td class="num"></td><td class="num"></td><td class="num"></td><td class="num">${fmtNum(amount)}</td>
+      <td></td><td class="num"></td>
+    </tr>` : `<tr>
+      <td></td><td>${fmtDateShort(asset.date_acquired)}</td><td></td>
+      <td>Included in acquisition cost above</td><td class="num">${fmtNum(amount)}</td>
+      <td class="num"></td><td class="num">${fmtNum(amount)}</td>
+      <td></td><td class="num"></td>
+    </tr>`);
   const primaryData = timeline.map((r, i) => dataRowHtml(r, i)).join("");
+  const amounts = opts.componentAmounts || [];
   const sections = [sectionHtml(opts.components[0], Math.max(2, 5 - timeline.length), primaryData)]
-    .concat(opts.components.slice(1).map(label => sectionHtml(label, 5)));
+    .concat(opts.components.slice(1).map((label, i) => {
+      const amount = amounts[i + 1];
+      return sectionHtml(label, amount != null ? 4 : 5, componentDataRow(amount));
+    }));
   const theadCols = isLedger
     ? `<tr>
         <th rowspan="2" style="width:11%">Components</th><th rowspan="2" style="width:7%">Estimated<br>Useful Life</th>
@@ -3642,6 +4255,7 @@ function roadLedgerCardHtml(asset) {
   return componentSectionedCardHtml(asset, {
     title: "LOCAL ROAD NETWORK LEDGER CARD", headerRows: header, variant: "ledger",
     components: ["A. Road Lot", "B. Pavement", "C. Drainage and Slope Protection Structures", "D. Other Miscellaneous Structures (specify)"],
+    componentAmounts: roadComponentAmounts(asset),
   });
 }
 function roadPropertyCardHtml(asset) {
@@ -3655,6 +4269,7 @@ function roadPropertyCardHtml(asset) {
   return componentSectionedCardHtml(asset, {
     title: "LOCAL ROAD NETWORK PROPERTY CARD", headerRows: header, variant: "property",
     components: ["A. Road Lot", "B. Pavement", "C. Drainage and Slope Protection Structures", "D. Other Miscellaneous Structures (specify)"],
+    componentAmounts: roadComponentAmounts(asset),
   });
 }
 /** Other Public Infrastructure Ledger Card (Appendix 14) / Property Card (Appendix 58) — the rest
@@ -3694,6 +4309,7 @@ function buildingsLedgerCardHtml(asset) {
   return componentSectionedCardHtml(asset, {
     title: "BUILDINGS AND STRUCTURES LEDGER CARD", headerRows: header, variant: "ledger",
     components: ["A. Building", "B. Air Conditioning System", "C. Elevators/Escalators", "D. Others (specify)"],
+    componentAmounts: buildingComponentAmounts(asset),
   });
 }
 function buildingsPropertyCardHtml(asset) {
@@ -3706,7 +4322,32 @@ function buildingsPropertyCardHtml(asset) {
   return componentSectionedCardHtml(asset, {
     title: "BUILDINGS AND STRUCTURES PROPERTY CARD", headerRows: header, variant: "property",
     components: ["A. Building", "B. Air Conditioning System", "C. Elevators/Escalators", "D. Others (specify)"],
+    componentAmounts: buildingComponentAmounts(asset),
   });
+}
+/** [building, aircon, elevators, others] cost allocation for a Buildings asset that was completed
+ *  from a CIP project with its cost split across components (item 5, Sept 2026) — or all-null when
+ *  the asset predates that feature / wasn't split, so the printed card falls back to its old blank
+ *  placeholder rows for B/C/D exactly as before. */
+function buildingComponentAmounts(asset) {
+  const bc = asset.building_components;
+  if (!bc) return [];
+  return [bc.building, bc.aircon, bc.elevators, bc.others];
+}
+/** Item 9 (Sept 2026, Road Network real-data import): the client's own source spreadsheet keeps
+ *  the Road Lot (land under the road, never depreciated) and Pavement (the depreciable structure)
+ *  as separate figures, even though both are booked under the single Road Networks account
+ *  (10703010). This app has one Cost/Accumulated Depreciation schedule per asset, so instead of
+ *  a second ledger, the land value is protected from ever being depreciated away by folding it
+ *  into `residual_value` (see the Road Network bulk import below: residual_value = road_lot_value
+ *  + 5% of the pavement cost) — the schedule then depreciates only the pavement portion, exactly
+ *  as the source spreadsheet does. `road_lot_value`/`road_pavement_value` are kept purely so the
+ *  printed card can show a real Pavement figure under component B instead of a blank placeholder
+ *  row (component A's own row already carries the full combined cost via the real timeline, same
+ *  convention as buildingComponentAmounts() above). */
+function roadComponentAmounts(asset) {
+  if (asset.road_pavement_value == null) return [];
+  return [null, asset.road_pavement_value, null, null];
 }
 
 function openPrintWindow(title, html) {
@@ -4126,24 +4767,33 @@ function recordParIcsChoice(id) {
 /** Opens the unified Add Item modal pre-filled from a pending PAR/ICS record — the "catch it into
  *  the register" step. openAssetModal() locks the Item Type (PAR → PPE, ICS → Semi-Expendable) and
  *  sets S.linkParIcsId so saveAsset() marks this record "recorded" once the new asset is saved. */
+/** Reassembles a PAR/ICS record's Description textarea value — the main description line plus any
+ *  extra spec lines — back into one multi-line string. Shared by the Edit modal's textarea prefill
+ *  and by `recordParIcsAsNew` below, so "Record → Create a new item" carries over the FULL
+ *  description (not just its first line) into the new asset. */
+function parIcsFullDescription(r) {
+  return [r.description, ...(r.detail_lines || [])].filter(Boolean).join("\n");
+}
 function recordParIcsAsNew(id) {
   if (blockIfViewOnly("parics")) return;
   const r = S.parIcs.get(id);
   if (!r) return;
   if (r.recorded) return toast("Already recorded.");
   const isPar = r.doc_type === "par";
+  const fullDescription = parIcsFullDescription(r);
   const prefill = isPar
     ? {
         parIcsId: id, recordLabel: `PAR ${r.number}`, itemType: "ppe", fund: r.fund,
         property_id: r.property_number || "", date_acquired: r.date_acquired || r.date,
-        description: r.description, location: r.dept_office, cost: r.amount,
+        description: fullDescription, location: r.dept_office, cost: r.amount,
+        residual_value: round2((r.amount || 0) * 0.05),
         accountable_officer: r.received_by_name || "",
         remarks: `PAR No. ${r.number}`,
       }
     : {
         parIcsId: id, recordLabel: `ICS ${r.number}`, itemType: "sx", fund: r.fund,
         property_id: r.item_no || "", date_acquired: r.date,
-        description: r.description, location: r.entity_name,
+        description: fullDescription, location: r.entity_name,
         qty: r.qty, unit_cost: r.unit_cost, cost: r.cost, unit_of_measure: r.unit,
         accountable_officer: r.received_by_name || "",
         sen: r.number, remarks: `ICS No. ${r.number}`,
@@ -5339,6 +5989,7 @@ function renderAll() {
   renderParIcs();
   renderPtrItr();
   renderSwa();
+  renderHor();
   renderUsers();
   applyAccessControlToNav();
 }
@@ -5358,6 +6009,7 @@ const VIEW_TITLES = {
   parics: ["PAR / ICS", "Generate a Property Acknowledgment Receipt (PPE) or Inventory Custodian Slip (Semi-Expendable) — saved as a pending record until you record it into the Asset Register"],
   ptritr: ["PTR / ITR", "Property Transfer Report (PPE) or Inventory Transfer Report (Semi-Expendable) — generated automatically whenever an item's location or accountable officer is transferred"],
   swa: ["SWA", "Statement of Works Accomplished — upload the document, then match it to a Construction in Progress billing"],
+  hor: ["History of Repair", "Log a repair Job Order against an item already in the Asset Register — adds a Repair entry to that item's ledger"],
   users: ["Users & Roles", "Manage who can sign in, which tabs they can see, and whether they can edit or only view — Admins only"],
 };
 /** Sets the topbar title/subtitle from the current view + fund. Called on both view changes and
@@ -5473,11 +6125,13 @@ Object.assign(window, {
   printCipLedgerCard, printCipLedgerCardsBulk, exportCipCsv,
   openCipBulkImportModal, submitCipBulkImport,
   openSxBulkAddModal, submitSxBulkAdd,
+  openRoadBulkImportModal, submitRoadBulkImport,
   openSxLedgerEntryModal, saveSxLedgerEntry,
   openParModal, openIcsModal, saveParIcs, deleteParIcs, printPar, printIcs, exportParIcsCsv,
   recordParIcsChoice, recordParIcsAsNew, openMatchParIcsModal, matchParIcsToExisting, unrecordParIcs,
   printPtr, printItr, exportPtrItrCsv, openEditPtrItrModal, savePtrItrEdit,
   openSwaModal, saveSwa, deleteSwa, unmatchSwa, exportSwaCsv, openMatchSwaModal, pickSwaForBilling, unmatchDraftSwa,
+  openHorModal, saveHorRecord, deleteHorRecord, printHor, addHorSparepartLine,
   openUserRoleModal, saveUserRole, deleteUserRole,
   openChangePasswordModal, submitChangePassword,
 });
