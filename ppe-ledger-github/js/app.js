@@ -718,8 +718,13 @@ function initDb() {
   }
 }
 function setSync(live, msg) {
-  document.getElementById("syncdot").classList.toggle("live", !!live);
-  document.getElementById("syncstatus").textContent = msg || (live ? "Live — synced with your team" : "Offline");
+  // The topbar's "Live — synced…"/"Offline" indicator was removed from the UI (Sept 2026 follow-up)
+  // at the client's request, but this still runs on every snapshot, so guard rather than assume the
+  // elements exist — keeps this a no-op instead of throwing if they're ever re-added conditionally.
+  const dot = document.getElementById("syncdot");
+  const status = document.getElementById("syncstatus");
+  if (dot) dot.classList.toggle("live", !!live);
+  if (status) status.textContent = msg || (live ? "Live — synced with your team" : "Offline");
 }
 
 /* ============================================================
@@ -2920,16 +2925,17 @@ function openCipCompleteModal(id) {
       <div id="ct_road_block" style="display:none;">
         <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
         <p class="subtle" style="font-size:12.5px;margin-top:0;">This is a Road Network asset. Say whether the ${fmtMoney(total)} billed total is for a brand-new road or is more work on a road already in the Register (e.g. repaving/concreting an existing street), and which of the road's 4 cost components (A–D) it represents.</p>
-        <div class="field">
-          <label style="font-weight:normal;"><input type="radio" name="ct_road_mode" value="new" checked> Create a new Road Network</label>
-          &nbsp;&nbsp;&nbsp;
-          <label style="font-weight:normal;"><input type="radio" name="ct_road_mode" value="existing"> Add to an existing Road Network</label>
+        <div class="field" style="display:flex;flex-wrap:wrap;gap:18px;">
+          <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;"><input type="radio" name="ct_road_mode" value="new" checked style="width:auto;"> Create a new Road Network</label>
+          <label style="display:inline-flex;align-items:center;gap:6px;font-weight:400;"><input type="radio" name="ct_road_mode" value="existing" style="width:auto;"> Add to existing Road Network(s)</label>
         </div>
-        <div id="ct_road_existing_wrap" class="field" style="display:none;">
-          <label>Existing road</label>
-          <select id="ct_road_existing">${roadNetworkOptions(p.fund || "GF")}</select>
+        <div id="ct_road_existing_wrap" style="display:none;">
+          <label>Existing road(s) — split the ${fmtMoney(total)} total across as many as this project covers</label>
+          <div id="ct_road_rows"></div>
+          <button type="button" class="btn small" id="ct_road_add_row">+ Add another road</button>
+          <p class="subtle" id="ct_road_alloc_status" style="font-size:12px;margin:8px 0 0;"></p>
         </div>
-        <div class="field">
+        <div id="ct_road_new_category_wrap" class="field">
           <label>Cost component this amount represents</label>
           <select id="ct_road_category">
             <option value="lot">A. Road Lot</option>
@@ -2982,13 +2988,66 @@ function openCipCompleteModal(id) {
   // new asset is being created in that case (see completeCipProject).
   const roadBlock = document.getElementById("ct_road_block");
   const roadExistingWrap = document.getElementById("ct_road_existing_wrap");
+  const roadNewCategoryWrap = document.getElementById("ct_road_new_category_wrap");
   const genericFields = document.getElementById("ct_generic_fields");
+  // Existing-road mode (Sept 2026 follow-up): a single CIP project can legitimately cover more than
+  // one street (e.g. "Concreting of Pajarillo St, Pabera St and Delos Santos St"), so instead of one
+  // road picker this is a repeatable row-builder — each row is its own road + cost component +
+  // amount, and the amounts must add up to the full billed total before this can be confirmed.
+  const roadRowsContainer = document.getElementById("ct_road_rows");
+  const roadAddRowBtn = document.getElementById("ct_road_add_row");
+  const roadAllocStatus = document.getElementById("ct_road_alloc_status");
+  let roadRowSeq = 0;
+  const roadRowHtml = (amount) => `
+    <div class="fieldrow ct_road_row" style="grid-template-columns:2fr 2fr 1fr auto;align-items:end;gap:8px;margin-bottom:8px;">
+      <div class="field" style="margin-bottom:0;"><label>Road</label><select class="ct_road_row_asset">${roadNetworkOptions(p.fund || "GF")}</select></div>
+      <div class="field" style="margin-bottom:0;">
+        <label>Cost component</label>
+        <select class="ct_road_row_category">
+          <option value="lot">A. Road Lot</option>
+          <option value="pavement" selected>B. Pavement</option>
+          <option value="drainage">C. Drainage and Slope Protection Structures</option>
+          <option value="other">D. Other Miscellaneous Structures</option>
+        </select>
+      </div>
+      <div class="field" style="margin-bottom:0;"><label>Amount (Php)</label><input type="number" step="0.01" class="ct_road_row_amount" value="${amount}"></div>
+      <button type="button" class="iconbtn ct_road_row_remove" title="Remove this road" style="margin-bottom:8px;">✕</button>
+    </div>`;
+  const recomputeRoadAllocStatus = () => {
+    const amounts = [...roadRowsContainer.querySelectorAll(".ct_road_row_amount")].map(el => Number(el.value) || 0);
+    const sum = round2(amounts.reduce((a, b) => a + b, 0));
+    const remaining = round2(total - sum);
+    if (Math.abs(remaining) < 0.01) { roadAllocStatus.textContent = `Allocated: ${fmtMoney(sum)} of ${fmtMoney(total)} ✓`; roadAllocStatus.style.color = "var(--good, #2e7d32)"; }
+    else if (remaining > 0) { roadAllocStatus.textContent = `Allocated: ${fmtMoney(sum)} of ${fmtMoney(total)} — ${fmtMoney(remaining)} left to assign`; roadAllocStatus.style.color = ""; }
+    else { roadAllocStatus.textContent = `Allocated: ${fmtMoney(sum)} of ${fmtMoney(total)} — ${fmtMoney(-remaining)} over the billed total`; roadAllocStatus.style.color = "var(--bad, #b3261e)"; }
+  };
+  const addRoadRow = (amount) => {
+    roadRowSeq++;
+    const wrap = document.createElement("div");
+    wrap.innerHTML = roadRowHtml(amount != null ? amount : 0);
+    const rowEl = wrap.firstElementChild;
+    roadRowsContainer.appendChild(rowEl);
+    rowEl.querySelector(".ct_road_row_amount").addEventListener("input", recomputeRoadAllocStatus);
+    rowEl.querySelector(".ct_road_row_remove").addEventListener("click", () => {
+      if (roadRowsContainer.children.length <= 1) return toast("At least one road is required — remove this project from Road Networks instead if that's not right.");
+      rowEl.remove();
+      recomputeRoadAllocStatus();
+    });
+    recomputeRoadAllocStatus();
+  };
+  roadAddRowBtn.addEventListener("click", () => addRoadRow(0));
   const toggleRoadBlock = () => {
     const isRoad = ROAD_ACCOUNT_CODES.includes(Number(document.getElementById("ct_account").value));
     roadBlock.style.display = isRoad ? "" : "none";
     const mode = (document.querySelector('input[name="ct_road_mode"]:checked') || {}).value || "new";
-    roadExistingWrap.style.display = (isRoad && mode === "existing") ? "" : "none";
-    genericFields.style.display = (isRoad && mode === "existing") ? "none" : "";
+    const existingMode = isRoad && mode === "existing";
+    roadExistingWrap.style.display = existingMode ? "" : "none";
+    roadNewCategoryWrap.style.display = existingMode ? "none" : "";
+    genericFields.style.display = existingMode ? "none" : "";
+    // Seed a single row pre-filled with the full total the first time existing-mode is entered —
+    // covers the common single-road case with no extra clicks, while still letting the user split
+    // it across more rows (or change the amount) when the project covers several streets.
+    if (existingMode && roadRowsContainer.children.length === 0) addRoadRow(total);
   };
   // For a NEW road, auto-suggest the Residual value from the chosen component — Road Lot IS the
   // residual value (land never depreciates), any other component defaults to zero residual, same
@@ -3031,39 +3090,62 @@ async function completeCipProject(id) {
   const roadField = isRoad ? ROAD_CATEGORY_FIELDS[roadCategory] : null;
 
   // Road Networks follow-up (Sept 2026): a CIP project can either become a brand-new road, or add
-  // its billed total onto a road ALREADY in the Register — e.g. "Concreting of Pajarillo St." is
-  // more Pavement cost on an existing street, not a new one. Adding to an existing road doesn't
-  // create a new asset at all: it bumps that road's chosen component (A–D) and logs the change as a
-  // Revaluation (the same audit-trail mechanism revalueAsset() already uses), so the printed Ledger
-  // Card shows a real dated entry for it rather than a silent number change.
+  // its billed total onto road(s) ALREADY in the Register — e.g. "Concreting of Pajarillo St.,
+  // Pabera St. and Delos Santos St." is more Pavement cost split across three existing streets, not
+  // one new road. Adding to existing road(s) doesn't create a new asset at all: each affected road's
+  // chosen component (A–D) is bumped by its own row's amount and logged as a Revaluation (the same
+  // audit-trail mechanism revalueAsset() already uses), so the printed Ledger Card shows a real
+  // dated entry rather than a silent number change.
   if (isRoad && roadMode === "existing") {
-    const existingId = document.getElementById("ct_road_existing").value;
-    const existing = existingId ? S.assets.get(existingId) : null;
-    if (!existing) return toast("Select which existing road this billed total should be added to.");
-    const fieldsAfter = {
-      road_lot_value: existing.road_lot_value || 0, road_pavement_value: existing.road_pavement_value || 0,
-      road_drainage_value: existing.road_drainage_value || 0, road_other_value: existing.road_other_value || 0,
-    };
-    fieldsAfter[roadField] = round2((fieldsAfter[roadField] || 0) + total);
-    const newCost = round2(fieldsAfter.road_lot_value + fieldsAfter.road_pavement_value + fieldsAfter.road_drainage_value + fieldsAfter.road_other_value);
-    const oldResidual = existing.residual_value || 0;
-    const newResidual = roadField === "road_lot_value" ? fieldsAfter.road_lot_value : oldResidual;
-    const revalEntry = {
-      date, old_cost: existing.cost || 0, new_cost: newCost, old_residual: oldResidual, new_residual: newResidual,
-      reason: `CIP transfer — ${p.name || p.cip_code || "project"} (${ROAD_CATEGORY_LABELS[roadCategory]}, +${fmtMoney(total)})`,
-      by: viewerLabel(), at: new Date().toISOString(),
-    };
+    const rows = [...document.querySelectorAll("#ct_road_rows .ct_road_row")].map(rowEl => ({
+      assetId: rowEl.querySelector(".ct_road_row_asset").value,
+      category: rowEl.querySelector(".ct_road_row_category").value,
+      amount: round2(Number(rowEl.querySelector(".ct_road_row_amount").value) || 0),
+    })).filter(r => r.assetId && r.amount > 0);
+    if (!rows.length) return toast("Select at least one existing road and an amount to add to it.");
+    const sum = round2(rows.reduce((a, r) => a + r.amount, 0));
+    if (Math.abs(sum - total) > 0.01) return toast(`The amounts must add up to the full billed total of ${fmtMoney(total)} (currently ${fmtMoney(sum)}).`);
+    // Group rows by asset — the same road can appear in more than one row (e.g. both a Pavement and
+    // a Drainage amount for the same street) — so each affected asset is only written once.
+    const byAsset = new Map();
+    for (const r of rows) { if (!byAsset.has(r.assetId)) byAsset.set(r.assetId, []); byAsset.get(r.assetId).push(r); }
+    const updatedNames = [];
     try {
-      await S.db.collection("assets").doc(existingId).update({
-        [roadField]: fieldsAfter[roadField], cost: newCost, residual_value: newResidual,
-        revaluations: [...(existing.revaluations || []), revalEntry],
-        updated_by: viewerLabel(), updated_at: new Date().toISOString(),
-      });
+      for (const [assetId, entries] of byAsset) {
+        const existing = S.assets.get(assetId);
+        if (!existing) continue;
+        const fieldsAfter = {
+          road_lot_value: existing.road_lot_value || 0, road_pavement_value: existing.road_pavement_value || 0,
+          road_drainage_value: existing.road_drainage_value || 0, road_other_value: existing.road_other_value || 0,
+        };
+        let lotChanged = false;
+        const parts = [];
+        for (const e of entries) {
+          const field = ROAD_CATEGORY_FIELDS[e.category];
+          fieldsAfter[field] = round2((fieldsAfter[field] || 0) + e.amount);
+          if (field === "road_lot_value") lotChanged = true;
+          parts.push(`${ROAD_CATEGORY_LABELS[e.category]} +${fmtMoney(e.amount)}`);
+        }
+        const newCost = round2(fieldsAfter.road_lot_value + fieldsAfter.road_pavement_value + fieldsAfter.road_drainage_value + fieldsAfter.road_other_value);
+        const oldResidual = existing.residual_value || 0;
+        const newResidual = lotChanged ? fieldsAfter.road_lot_value : oldResidual;
+        const revalEntry = {
+          date, old_cost: existing.cost || 0, new_cost: newCost, old_residual: oldResidual, new_residual: newResidual,
+          reason: `CIP transfer — ${p.name || p.cip_code || "project"} (${parts.join("; ")})`,
+          by: viewerLabel(), at: new Date().toISOString(),
+        };
+        await S.db.collection("assets").doc(assetId).update({
+          ...fieldsAfter, cost: newCost, residual_value: newResidual,
+          revaluations: [...(existing.revaluations || []), revalEntry],
+          updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+        });
+        updatedNames.push(existing.description || existing.property_id || "a road");
+      }
       await S.db.collection("cip_projects").doc(id).update({
-        status: "completed", transferred_asset_id: existingId, transferred_at: new Date().toISOString(), transferred_by: viewerLabel(),
+        status: "completed", transferred_asset_id: [...byAsset.keys()][0], transferred_at: new Date().toISOString(), transferred_by: viewerLabel(),
         date_completed: date,
       });
-      toast(`CIP project completed — ${fmtMoney(total)} added to ${existing.description || existing.property_id || "the selected road"} (${ROAD_CATEGORY_LABELS[roadCategory]}).`);
+      toast(`CIP project completed — ${fmtMoney(total)} distributed across ${updatedNames.join(", ")}.`);
       closeModal();
     } catch (e) { console.error(e); toast("Couldn't complete — try again."); }
     return;
@@ -6302,9 +6384,13 @@ function renderAll() {
   applyAccessControlToNav();
 }
 function renderPeriodStatus() {
+  // The topbar's "Posted through …"/"No postings yet" caption was removed from the UI (Sept 2026
+  // follow-up) at the client's request; guard so this remains a harmless no-op if #periodStatus
+  // is gone rather than throwing on every render.
+  const el = document.getElementById("periodStatus");
+  if (!el) return;
   const last = lastPostedPeriod(S.currentFund);
-  document.getElementById("periodStatus").textContent =
-    last ? "Posted through " + periodShort(last) : "No postings yet";
+  el.textContent = last ? "Posted through " + periodShort(last) : "No postings yet";
 }
 const VIEW_TITLES = {
   dashboard: ["Dashboard", "PPE and Semi-Expendable Property, together in one place"],
