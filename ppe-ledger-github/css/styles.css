@@ -58,16 +58,18 @@
     width:228px; flex:none; background:var(--paper-sunken); border-right:1px solid var(--line);
     display:flex; flex-direction:column; position:sticky; top:0; height:100vh;
   }
-  .brand{ padding:20px 18px 14px; border-bottom:1px solid var(--line); }
-  .brand .seal{ display:flex; align-items:center; gap:10px; }
+  .brand{ padding:20px 18px 16px; border-bottom:1px solid var(--line); }
+  /* Logo + title centered as one stacked block (Sept 2026 follow-up), mirroring the sign-in
+     screen's already-centered seal — was a small, left-aligned logo-then-text row. */
+  .brand .seal{ display:flex; flex-direction:column; align-items:center; text-align:center; gap:8px; }
   .brand .mark{
-    width:34px; height:34px; border-radius:50%; border:1.5px solid var(--accent);
+    width:52px; height:52px; border-radius:50%; border:1.5px solid var(--accent);
     display:flex; align-items:center; justify-content:center; font-family:"Source Serif 4",serif;
-    font-weight:700; color:var(--accent-strong); font-size:14px; flex:none;
+    font-weight:700; color:var(--accent-strong); font-size:20px; flex:none;
     overflow:hidden; background:#fff;
   }
   .brand .mark img{ width:100%; height:100%; object-fit:cover; border-radius:50%; }
-  .brand h1{ font-size:14px; font-weight:600; margin:0; line-height:1.25; }
+  .brand h1{ font-size:14px; font-weight:600; margin:0; line-height:1.3; }
   .brand .sub{ font-size:11px; color:var(--ink-faint); margin-top:2px; letter-spacing:.02em; }
 
   /* ---------- Fund switcher ---------- */
