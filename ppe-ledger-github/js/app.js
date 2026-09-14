@@ -88,6 +88,17 @@ const ROAD_ACCOUNT_CODES = [10703010];
 const OTHER_INFRA_ACCOUNT_CODES = [10703020, 10703030, 10703040, 10703050, 10703060, 10703070, 10703080, 10703090, 10703990];
 const BUILDINGS_ACCOUNT_CODES = [10704010, 10704020, 10704030, 10704040, 10704050, 10704060, 10704990];
 const BIOLOGICAL_ACCOUNT_CODES = [10801010, 10801020, 10801030, 10801990];
+/** Sept 2026 client note: "all Infra Assets has zero residual value ... however the road lot is not
+ *  depreciable" — every Infrastructure Assets account (Road Networks + the rest of that COA group)
+ *  gets a 0 residual value by default, unlike the 5%-of-cost convention used everywhere else in this
+ *  app. For Road Networks specifically, the truly non-depreciable portion is the Road Lot (land) —
+ *  see roadComponentAmounts()/submitRoadBulkImport() below for how that's still protected from
+ *  depreciation (by becoming the asset's residual_value) without a second depreciation schedule. */
+const ZERO_RESIDUAL_ACCOUNT_CODES = [...ROAD_ACCOUNT_CODES, ...OTHER_INFRA_ACCOUNT_CODES];
+function isZeroResidualAccount(code) { return ZERO_RESIDUAL_ACCOUNT_CODES.includes(Number(code)); }
+/** Default residual value to suggest for a newly-typed cost under `code` — 0 for any Infrastructure
+ *  Assets account, else the usual 5%-of-cost convention used across the rest of the register. */
+function defaultResidualFor(code, cost) { return isZeroResidualAccount(code) ? 0 : round2((Number(cost) || 0) * 0.05); }
 function specialCardGroupFor(code) {
   code = Number(code);
   if (LAND_ACCOUNT_CODES.includes(code)) return "land";
@@ -113,13 +124,22 @@ function specialCardFieldsHtml(group, a) {
     </div>`;
   if (group === "road") return `
     <div class="fieldrow">
-      <div class="field"><label>Road Network ID No.</label><input id="f_sp_roadid" value="${v("road_id_no")}"></div>
+      <div class="field"><label>Road Network ID No.<br><span class="subtle" style="font-size:11px;font-weight:400;">This becomes the item's Property No. in the Asset Register — the Road ID is the property ID for a Road Network item.</span></label><input id="f_sp_roadid" value="${v("road_id_no")}"></div>
       <div class="field"><label>Type of road</label><input id="f_sp_roadtype" value="${v("road_type")}" placeholder="PCCP / Asphalt / Gravel"></div>
     </div>
     <div class="fieldrow3">
       <div class="field"><label>Length</label><input id="f_sp_length" value="${v("road_length")}"></div>
       <div class="field"><label>Width</label><input id="f_sp_width" value="${v("road_width")}"></div>
       <div class="field"><label>Thickness (pavement)</label><input id="f_sp_thickness" value="${v("road_thickness")}"></div>
+    </div>
+    <p class="subtle" style="font-size:11.5px;margin:10px 0 4px;">Cost by component — these four add up to the Cost field below, and A. Road Lot becomes the Residual value, since Road Lot (land) is the only part of a road that isn't depreciated:</p>
+    <div class="fieldrow">
+      <div class="field"><label>A. Road Lot (Php)</label><input type="number" step="0.01" id="f_sp_roadlot" value="${a && a.road_lot_value != null ? a.road_lot_value : ""}"></div>
+      <div class="field"><label>B. Pavement (Php)</label><input type="number" step="0.01" id="f_sp_roadpavement" value="${a && a.road_pavement_value != null ? a.road_pavement_value : ""}"></div>
+    </div>
+    <div class="fieldrow">
+      <div class="field"><label>C. Drainage and Slope Protection Structures (Php)</label><input type="number" step="0.01" id="f_sp_roaddrainage" value="${a && a.road_drainage_value != null ? a.road_drainage_value : ""}"></div>
+      <div class="field"><label>D. Other Miscellaneous Structures (Php)</label><input type="number" step="0.01" id="f_sp_roadother" value="${a && a.road_other_value != null ? a.road_other_value : ""}"></div>
     </div>`;
   if (group === "otherinfra") return `
     <div class="fieldrow">
@@ -145,10 +165,20 @@ function readSpecialCardFieldsFromForm(group) {
     land_lot_id: val("f_sp_lotid"), land_classification: val("f_sp_classification"),
     land_area: val("f_sp_area"), land_technical_desc: val("f_sp_techdesc"),
   };
-  if (group === "road") return {
-    road_id_no: val("f_sp_roadid"), road_type: val("f_sp_roadtype"),
-    road_length: val("f_sp_length"), road_width: val("f_sp_width"), road_thickness: val("f_sp_thickness"),
-  };
+  if (group === "road") {
+    const roadId = val("f_sp_roadid");
+    return {
+      road_id_no: roadId, road_type: val("f_sp_roadtype"),
+      road_length: val("f_sp_length"), road_width: val("f_sp_width"), road_thickness: val("f_sp_thickness"),
+      road_lot_value: round2(Number(val("f_sp_roadlot")) || 0),
+      road_pavement_value: round2(Number(val("f_sp_roadpavement")) || 0),
+      road_drainage_value: round2(Number(val("f_sp_roaddrainage")) || 0),
+      road_other_value: round2(Number(val("f_sp_roadother")) || 0),
+      // Road ID IS the property ID for a Road Network item (item 1, Sept 2026) — this overrides
+      // whatever's in the generic Property/Tag No. field above, once a Road ID is actually typed.
+      ...(roadId ? { property_id: roadId } : {}),
+    };
+  }
   if (group === "otherinfra") return {
     infra_id_no: val("f_sp_infraid"), infra_type: val("f_sp_infratype"), infra_other_desc: val("f_sp_infraother"),
   };
@@ -207,8 +237,11 @@ const BASELINE_PERIOD = "2025-12"; // last closed year-end this registry is anch
 const HARDCODED_ADMIN_EMAILS = ["npp@mgocandoniaccounting.org"];
 /** Tabs where "View" and "Edit" mean different things (there's something to Add/Edit/Delete/Post/
  *  Record/etc.). The remaining tabs are read-only by nature, so their access is a plain on/off. */
-const EDITABLE_TABS = ["register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "hor"];
-const VIEW_ONLY_TABS = ["dashboard", "reports", "retired"];
+// "retired" moved from VIEW_ONLY_TABS to here (item 7, Sept 2026) — Retired Assets now has a
+// mutating action (Delete), so it needs the same Edit/View/Hidden 3-way permission as every other
+// tab with something to change, rather than the plain View/Hidden 2-way choice a read-only tab gets.
+const EDITABLE_TABS = ["register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "hor", "retired"];
+const VIEW_ONLY_TABS = ["dashboard", "reports"];
 const ALL_PERMISSION_TABS = [...EDITABLE_TABS, ...VIEW_ONLY_TABS];
 
 // Municipal seal, embedded as a data: URI so the printed Equipment Ledger Card / Property Card
@@ -1113,7 +1146,7 @@ function openAssetModal(existingId, initialType, prefill) {
       <div id="f_block_ppe_cost">
         <div class="fieldrow3">
           <div class="field"><label>Cost (Php)</label><input type="number" step="0.01" id="f_cost" value="${a && itemType === "ppe" ? a.cost : (pf.cost != null ? pf.cost : "")}"></div>
-          <div class="field"><label>5% Residual value (Php)</label><input type="number" step="0.01" id="f_residual" value="${a && itemType === "ppe" ? a.residual_value : (pf.residual_value != null ? pf.residual_value : "")}"></div>
+          <div class="field"><label>Residual value (Php)</label><input type="number" step="0.01" id="f_residual" value="${a && itemType === "ppe" ? a.residual_value : (pf.residual_value != null ? pf.residual_value : "")}"></div>
           <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="f_life" value="${a && itemType === "ppe" ? a.useful_life_years : ""}"></div>
         </div>
         <div class="field" id="f_baselinead_wrap">
@@ -1179,17 +1212,42 @@ function openAssetModal(existingId, initialType, prefill) {
     document.getElementById("f_baselinead_wrap").style.display = info.depreciable ? "" : "none";
   };
   ["f_cost", "f_residual", "f_life", "f_account"].forEach(id => document.getElementById(id).addEventListener("input", updatePreview));
+  /** Road Networks (and, more generally, any Infrastructure Assets account — item 6, Sept 2026):
+   *  A. Road Lot / B. Pavement / C. Drainage and Slope Protection / D. Other Miscellaneous
+   *  Structures are the system of record for a road's cost — Cost and Residual value on the main
+   *  form are DERIVED from them (Cost = the four summed, Residual = Road Lot alone, since Road Lot
+   *  is the only non-depreciable piece), recomputed live whenever any of the four changes. Also
+   *  mirrors the Road Network ID into the Property/Tag No. field (item 1) — Road ID is the
+   *  Register's property ID for a road. Re-called after every updateSpecialFields() re-render,
+   *  since that swaps in fresh DOM nodes with no listeners of their own yet. */
+  const wireSpecialFieldEvents = group => {
+    if (group !== "road") return;
+    const ids = ["f_sp_roadlot", "f_sp_roadpavement", "f_sp_roaddrainage", "f_sp_roadother"];
+    const recomputeRoadCostResidual = () => {
+      const [lot, pavement, drainage, other] = ids.map(id => Number(document.getElementById(id).value) || 0);
+      document.getElementById("f_cost").value = round2(lot + pavement + drainage + other);
+      document.getElementById("f_residual").value = round2(lot);
+      updatePreview();
+    };
+    ids.forEach(id => document.getElementById(id).addEventListener("input", recomputeRoadCostResidual));
+    const roadIdInput = document.getElementById("f_sp_roadid");
+    if (roadIdInput) roadIdInput.addEventListener("input", () => { document.getElementById("f_propid").value = roadIdInput.value; });
+  };
   const updateSpecialFields = () => {
     const code = Number(document.getElementById("f_account").value);
-    document.getElementById("f_block_special").innerHTML = specialCardFieldsHtml(specialCardGroupFor(code), a);
+    const group = specialCardGroupFor(code);
+    document.getElementById("f_block_special").innerHTML = specialCardFieldsHtml(group, a);
+    wireSpecialFieldEvents(group);
   };
   document.getElementById("f_account").addEventListener("change", () => {
+    const code = Number(document.getElementById("f_account").value);
     const cost = document.getElementById("f_cost").value;
-    if (!document.getElementById("f_residual").value && cost) document.getElementById("f_residual").value = round2(Number(cost) * 0.05);
+    if (!document.getElementById("f_residual").value && cost) document.getElementById("f_residual").value = defaultResidualFor(code, cost);
     updatePreview();
     updateSpecialFields();
   });
   updatePreview();
+  wireSpecialFieldEvents(specialCardGroupFor(a && itemType === "ppe" ? a.account_code : null));
   const updateSxPreview = () => {
     const cost = Number(document.getElementById("f_sx_cost").value) || 0;
     document.getElementById("f_sx_classpreview").innerHTML = sxClassificationPill(sxClassificationOf({ cost }));
@@ -1906,7 +1964,7 @@ async function submitBulkAdd() {
       dep_exp_account_code: info.expCode, dep_exp_account_name: info.expName,
       property_id: propid || "", date_acquired: date || null, description: desc || "",
       location: loc || "", accountable_officer: officer || "", remarks: "",
-      cost: c, residual_value: round2(Number(residual) || c * 0.05), useful_life_years: Number(life) || 0,
+      cost: c, residual_value: round2(Number(residual) || defaultResidualFor(Number(code), c)), useful_life_years: Number(life) || 0,
       depreciable: !!info.depreciable, status: "active", accum_depr_baseline: round2(Number(baselineAd) || 0),
       source_sheet: "Bulk import", updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     });
@@ -1916,25 +1974,31 @@ async function submitBulkAdd() {
   closeModal();
 }
 
-/* ---------- Road Network bulk import (item 9, Sept 2026) ----------
-   One row per Road Network — the client's own source ledger keeps Road Lot (land, never
-   depreciated) and Pavement (the depreciable structure) as separate cost layers under the same
-   10703010 account, sometimes across many historical billing rows per road. This importer expects
-   ONE already-aggregated row per road (road_lot_value = that road's total land cost, pavement_cost
-   = that road's total pavement/concreting cost, accum_depr_baseline_pavement = the pavement
-   portion's accumulated depreciation as of this registry's baseline period) — aggregating many
-   historical billing rows for the same road into one row is done before pasting here, the same
-   simplification already used for CIP/SEF/Trust Fund historical bulk imports elsewhere in this app.
-   See roadComponentAmounts() above for how the Road Lot / Pavement split still shows on the printed
-   Ledger/Property Card despite there being only one Cost/Accumulated Depreciation schedule. */
+/* ---------- Road Network bulk import (item 9, Sept 2026; 4-category cost split + zero residual
+   corrected item 6, Sept 2026) ----------
+   One row per Road Network — the client's own source ledger keeps a road's cost in up to four
+   layers, all booked under the same 10703010 account: A. Road Lot (land, never depreciated),
+   B. Pavement, C. Drainage and Slope Protection Structures, D. Other Miscellaneous Structures —
+   sometimes across many historical billing rows per road. This importer expects ONE
+   already-aggregated row per road (aggregating many historical billing rows for the same road into
+   one row per category is done before pasting here, the same simplification already used for
+   CIP/SEF/Trust Fund historical bulk imports elsewhere in this app). The Road ID IS this item's
+   Property No. in the Register (item 1) — there's no separate property_id column any more.
+   Per the client's Sept 2026 clarification, every Infrastructure Assets account (this one included)
+   carries a ZERO residual value on its depreciable portion — Road Lot is the only piece of a road
+   that isn't depreciated, so residual_value = road_lot_value exactly (not, as an earlier version of
+   this importer had it, road_lot_value plus a 5% cushion on Pavement — see isZeroResidualAccount()/
+   defaultResidualFor() near the top of this file). See roadComponentAmounts() below for how the
+   four categories still show on the printed Ledger/Property Card despite there being only one
+   Cost/Accumulated Depreciation schedule per asset. */
 function openRoadBulkImportModal() {
   openModal(`
     <div class="modal-head"><h3>Bulk import Road Network</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
-      <p class="subtle">These will be added as <b>PPE</b> (account 10703010 — Road Networks) to <b>${esc(fundLabel(S.currentFund))}</b> — switch funds in the sidebar first if that's not right. One row per road — if your source ledger has separate historical billing rows per road, add up their costs into a single Pavement figure (and Road Lot value) before pasting.</p>
+      <p class="subtle">These will be added as <b>PPE</b> (account 10703010 — Road Networks) to <b>${esc(fundLabel(S.currentFund))}</b> — switch funds in the sidebar first if that's not right. One row per road — if your source ledger has separate historical billing rows per road, add up their costs into single A–D category figures before pasting.</p>
       <p class="subtle">Upload a CSV file, or paste rows — one road per line, columns in this order:</p>
-      <p class="mono subtle" style="font-size:10.5px;">road_id_no, road_name, road_type, location, road_length_meters, date_acquired (YYYY-MM-DD), road_lot_value, pavement_cost, useful_life_years, accum_depr_baseline_pavement (optional), property_id (optional)</p>
-      <p class="subtle" style="font-size:12px;">Road Lot value is never depreciated — it's folded into the item's residual value so the schedule only depreciates the Pavement figure, matching how the source ledger already treats land under the road. "accum_depr_baseline_pavement" is the Pavement portion's own accumulated depreciation as of ${esc(periodLabel(BASELINE_PERIOD))} — leave it off for a road with no depreciation history yet.</p>
+      <p class="mono subtle" style="font-size:10.5px;">road_id_no, road_name, road_type, location, road_length_meters, date_acquired (YYYY-MM-DD), A_road_lot_value, B_pavement_value, useful_life_years, accum_depr_baseline (optional), C_drainage_value (optional), D_other_value (optional)</p>
+      <p class="subtle" style="font-size:12px;">Road ID becomes this item's Property No. in the Register. A. Road Lot is never depreciated — it becomes the item's residual value, so the schedule only depreciates B+C+D, matching the government's zero-residual policy for Infrastructure Assets. "accum_depr_baseline" is the depreciable portion's (B+C+D) own accumulated depreciation as of ${esc(periodLabel(BASELINE_PERIOD))} — leave it off for a road with no depreciation history yet.</p>
       <div class="field" style="margin-top:10px;">
         <label>CSV file</label>
         <input type="file" id="roadBulkFile" accept=".csv,text/csv">
@@ -1982,22 +2046,26 @@ async function submitRoadBulkImport() {
   const info = accountInfo(10703010);
   let added = 0;
   for (const cols of rows) {
-    const [roadId, roadName, roadType, location, lengthM, date, roadLot, pavement, life, baselineAd, propid] = cols;
+    const [roadId, roadName, roadType, location, lengthM, date, roadLot, pavement, life, baselineAd, drainageRaw, otherRaw] = cols;
     const roadLotValue = round2(Number(roadLot) || 0);
     const pavementValue = round2(Number(pavement) || 0);
-    const total = round2(roadLotValue + pavementValue);
+    const drainageValue = round2(Number(drainageRaw) || 0);
+    const otherValue = round2(Number(otherRaw) || 0);
+    const total = round2(roadLotValue + pavementValue + drainageValue + otherValue);
     if (total <= 0) continue;
     await S.db.collection("assets").add({
       item_type: "ppe", fund: S.currentFund,
       account_code: 10703010, account_name: info.name, ad_account_code: 10703011,
       dep_exp_account_code: info.expCode, dep_exp_account_name: info.expName,
-      property_id: propid || "", road_id_no: roadId || "", road_type: roadType || "",
+      // Road ID is the property ID (item 1, Sept 2026) — no separate property_id column any more.
+      property_id: roadId || "", road_id_no: roadId || "", road_type: roadType || "",
       road_length: lengthM || "", date_acquired: parseFlexibleDate(date), description: roadName || "",
       location: location || "", accountable_officer: "", remarks: "",
-      cost: total, residual_value: round2(roadLotValue + round2(pavementValue * 0.05)),
+      cost: total, residual_value: roadLotValue, // zero residual on B/C/D — see the comment above
       useful_life_years: Number(life) || 15, depreciable: true, status: "active",
       accum_depr_baseline: round2(Number(baselineAd) || 0),
       road_lot_value: roadLotValue, road_pavement_value: pavementValue,
+      road_drainage_value: drainageValue, road_other_value: otherValue,
       source_sheet: "Road Network bulk import", updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     });
     added++;
@@ -2325,7 +2393,7 @@ function renderRetired() {
         <button class="btn" onclick="exportRetiredCsv()">Download CSV</button>
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
-        <thead><tr><th>Type</th><th>Property/SEN</th><th>Category</th><th>Description</th><th>Location</th><th class="num">Cost</th><th class="num">Accum. Depr. (frozen)</th><th>Reason</th><th>Retired</th></tr></thead>
+        <thead><tr><th>Type</th><th>Property/SEN</th><th>Category</th><th>Description</th><th>Location</th><th class="num">Cost</th><th class="num">Accum. Depr. (frozen)</th><th>Reason</th><th>Retired</th><th></th></tr></thead>
         <tbody>${rows.length ? rows.map(a => {
           const sx = itemTypeOf(a) === "sx";
           return `
@@ -2339,12 +2407,36 @@ function renderRetired() {
             <td class="num mono">${sx ? '<span class="subtle">n/a</span>' : fmtMoney(a.accum_depr_baseline)}</td>
             <td class="truncate" title="${esc(a.retire_detail)}">${esc(a.retire_reason) || "—"}</td>
             <td class="mono">${fmtDate(a.retired_at ? a.retired_at.slice(0, 10) : "")}</td>
+            <td>${canEdit("retired") ? `<button class="btn small danger" onclick="event.stopPropagation();deleteRetiredAsset('${a.id}')">Delete</button>` : ""}</td>
           </tr>`;
-        }).join("") : `<tr><td colspan="9"><div class="empty">No retired items.</div></td></tr>`}
+        }).join("") : `<tr><td colspan="10"><div class="empty">No retired items.</div></td></tr>`}
         </tbody>
       </table></div></div>
     </div>
   `;
+}
+/** Permanently deletes a retired item from the Register — for an item uploaded incorrectly or on
+ *  trial/test that has no place being in the register at all, not for routine derecognition (that's
+ *  what Retire already does, and it keeps the item on record). Gated by canEdit("retired") — only
+ *  someone with Edit access to the Retired Assets tab (an Admin, or a role explicitly granted it via
+ *  Users & Roles) can do this (item 7, Sept 2026). Only reachable for an item whose status is
+ *  already "retired" (the button only renders on this tab), so an active item is never at risk here. */
+async function deleteRetiredAsset(id) {
+  if (blockIfViewOnly("retired")) return;
+  const a = S.assets.get(id);
+  if (!a || a.status !== "retired") return;
+  const linkedHor = [...S.historyOfRepair.values()].filter(r => r.asset_id === id).length;
+  const linkedPtrItr = [...S.ptrItr.values()].filter(r => r.asset_id === id).length;
+  let warn = "";
+  if (linkedHor || linkedPtrItr) {
+    const parts = [];
+    if (linkedHor) parts.push(`${linkedHor} History of Repair record(s)`);
+    if (linkedPtrItr) parts.push(`${linkedPtrItr} PTR/ITR record(s)`);
+    warn = ` This item has ${parts.join(" and ")} pointing to it — those records will stay on file but will show as "item removed" once this is deleted.`;
+  }
+  if (!confirm(`Permanently delete ${a.property_id || a.sen || "this item"} — ${a.description || ""}? This can't be undone.${warn}`)) return;
+  await S.db.collection("assets").doc(id).delete();
+  toast("Item permanently deleted.");
 }
 function exportRetiredCsv() {
   const rows = assetsInCurrentFund().filter(a => a.status === "retired")
@@ -2815,7 +2907,7 @@ function openCipCompleteModal(id) {
       </div>
       <div class="fieldrow">
         <div class="field"><label>Useful life (years)</label><input type="number" step="1" id="ct_life" value="25"></div>
-        <div class="field"><label>5% Residual value (Php)</label><input type="number" step="0.01" id="ct_residual" value="${round2(total * 0.05)}"></div>
+        <div class="field"><label>Residual value (Php)</label><input type="number" step="0.01" id="ct_residual" value="${defaultResidualFor(defaultCode, total)}"></div>
       </div>
       <div id="ct_buildings_block" style="display:none;">
         <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
@@ -2837,7 +2929,10 @@ function openCipCompleteModal(id) {
   `);
   const buildingsBlock = document.getElementById("ct_buildings_block");
   const toggleBuildingsBlock = () => { buildingsBlock.style.display = BUILDINGS_ACCOUNT_CODES.includes(Number(document.getElementById("ct_account").value)) ? "" : "none"; };
-  document.getElementById("ct_account").addEventListener("change", toggleBuildingsBlock);
+  // Re-suggest the Residual value whenever the target category changes — 0 for an Infrastructure
+  // Assets category (item 6, Sept 2026), else the usual 5%-of-cost convention.
+  const recomputeCtResidual = () => { document.getElementById("ct_residual").value = defaultResidualFor(Number(document.getElementById("ct_account").value), total); };
+  document.getElementById("ct_account").addEventListener("change", () => { toggleBuildingsBlock(); recomputeCtResidual(); });
   toggleBuildingsBlock();
   // "Building" auto-absorbs whatever's left after Air Conditioning/Elevators/Others, so the four
   // components always sum to the total without the user having to do the subtraction by hand.
@@ -3326,7 +3421,7 @@ function renderHor() {
             <td class="truncate">${esc(r.supplier) || "—"}</td>
             <td class="num mono">${fmtMoney(r.total_cost)}</td>
             <td>
-              <button class="btn small" style="margin-right:4px;" onclick="printHor('${r.id}')">Print</button>
+              <button class="btn small" style="margin-right:4px;" onclick="printHor('${r.id}')" title="Prints this item's full repair history, not just this Job Order">Print History</button>
               ${a ? `<a href="#" onclick="openAssetDetail('${a.id}');return false;" style="font-size:11px;margin-right:8px;">view item</a>` : `<span class="subtle" style="font-size:11px;margin-right:8px;">item removed</span>`}
               ${canEdit("hor") ? `<button class="btn small" style="margin-right:4px;" onclick="openHorModal('${r.id}')">Edit</button>
                  <button class="btn small danger" onclick="deleteHorRecord('${r.id}')">Delete</button>` : ""}
@@ -3345,8 +3440,15 @@ function renderHor() {
  *  in the Asset Registry are allowed" (item #50): since nothing outside this list is selectable,
  *  saveHorRecord()'s own `if (!asset) return toast(...)` guard is defense-in-depth, not the only
  *  check. */
-function horAssetOptions(selectedId) {
-  const rows = activeAssets(S.currentFund).slice().sort((a, b) => (a.property_id || a.sen || "").localeCompare(b.property_id || b.sen || ""));
+/** `query`, when given, narrows the option list to items whose property/SEN or description contain
+ *  it (case-insensitive) — backs the "find the item" search box in the New/Edit Repair Record modal
+ *  (item 3, Sept 2026). The selected item is always kept in the list even if it no longer matches a
+ *  newly-typed query, so re-filtering never silently drops the current selection out from under the
+ *  user. */
+function horAssetOptions(selectedId, query) {
+  let rows = activeAssets(S.currentFund).slice().sort((a, b) => (a.property_id || a.sen || "").localeCompare(b.property_id || b.sen || ""));
+  const q = (query || "").trim().toLowerCase();
+  if (q) rows = rows.filter(a => a.id === selectedId || [a.property_id, a.sen, a.description].some(v => v && String(v).toLowerCase().includes(q)));
   return `<option value="">— Select item from Asset Register —</option>` + rows.map(a =>
     `<option value="${a.id}" ${a.id === selectedId ? "selected" : ""}>${esc(a.property_id || a.sen || a.id)} — ${esc(a.description)}</option>`).join("");
 }
@@ -3375,6 +3477,7 @@ function openHorModal(existingId) {
     <div class="modal-head"><h3>${r ? "Edit Repair Record" : "New Repair Record"}</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
     <div class="modal-body">
       <div class="field"><label>Item to repair (must already be in the Asset Register)</label>
+        <input id="h_asset_search" placeholder="Find by property no./SEN or description…" style="margin-bottom:6px;">
         <select id="h_asset">${horAssetOptions(r ? r.asset_id : "")}</select>
       </div>
       <div class="fieldrow">
@@ -3414,9 +3517,9 @@ function openHorModal(existingId) {
       </div>
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
       <div class="fieldrow">
-        <div class="field"><label>Prepared by</label><input id="h_prepared_by" value="${esc(r ? r.prepared_by : "Motorpool Coordinator - Designate")}"></div>
-        <div class="field"><label>Verified by</label><input id="h_verified_by" value="${esc(r ? r.verified_by : "Inspection Incharge")}"></div>
-        <div class="field"><label>Noted by</label><input id="h_noted_by" value="${esc(r ? r.noted_by : "Municipal Mayor")}"></div>
+        <div class="field"><label>Prepared by</label><input id="h_prepared_by" value="${esc(r ? r.prepared_by : "")}"></div>
+        <div class="field"><label>Verified by</label><input id="h_verified_by" value="${esc(r ? r.verified_by : "")}"></div>
+        <div class="field"><label>Noted by</label><input id="h_noted_by" value="${esc(r ? r.noted_by : "")}"></div>
       </div>
     </div>
     <div class="modal-foot">
@@ -3424,6 +3527,26 @@ function openHorModal(existingId) {
       <button class="btn primary" onclick="saveHorRecord(${r ? `'${r.id}'` : "null"})">${r ? "Save changes" : "Save Repair Record"}</button>
     </div>
   `, "wide");
+  const assetSelect = document.getElementById("h_asset");
+  // "Find the item" search box (item 3, Sept 2026): re-renders the <select>'s own option list on
+  // every keystroke, same live-filter pattern as the Match PAR/ICS search — no separate results
+  // list needed since a native <select> is already the picker.
+  document.getElementById("h_asset_search").addEventListener("input", e => {
+    const current = assetSelect.value;
+    assetSelect.innerHTML = horAssetOptions(current, e.target.value);
+  });
+  // Selecting an item auto-encodes its Property No., Date (of acquisition), End User (accountable
+  // officer), and Make & Model (from the item's own description) — item 3, Sept 2026. Only fires on
+  // an actual selection change, so an existing record's own saved values (set above) are left alone
+  // until the user actively picks something different.
+  assetSelect.addEventListener("change", () => {
+    const picked = S.assets.get(assetSelect.value);
+    if (!picked) return;
+    document.getElementById("h_property_no").value = picked.property_id || picked.sen || "";
+    document.getElementById("h_date").value = picked.date_acquired || "";
+    document.getElementById("h_end_user").value = picked.accountable_officer || "";
+    document.getElementById("h_make_model").value = picked.description || "";
+  });
 }
 async function saveHorRecord(existingId) {
   if (!S.db) return toast("No shared database in this view.");
@@ -3520,14 +3643,47 @@ async function deleteHorRecord(id) {
   }
   toast("Repair record deleted.");
 }
+/** All History of Repair records for one asset, oldest first — this IS "the history" (item 5,
+ *  Sept 2026): printing an item's History of Repair means every repair ever logged against it, not
+ *  just whichever record you happened to click Print on. */
+function historyRecordsForAsset(assetId) {
+  return [...S.historyOfRepair.values()].filter(r => r.asset_id === assetId)
+    .sort((a, b) => (a.job_order_date || a.date || "").localeCompare(b.job_order_date || b.date || ""));
+}
+/** One Job Order's own block within the combined per-asset printout below — Job Order No./Date,
+ *  Invoice/PO, Supplier, and that Job Order's own spareparts table with its own subtotal. No fixed
+ *  blank-row padding here (that only made sense for a single, one-off receipt) since a real
+ *  multi-repair history is a variable-length ledger, not a fixed-size form. */
+function horJobOrderBlockHtml(r) {
+  const lines = r.spareparts || [];
+  return `
+    <div class="headrow" style="margin-top:10px;">
+      <div class="infoline" style="flex:1;margin-bottom:0;"><b>Job Order No./Date :</b><span class="val">${esc(r.job_order_no) || "—"} — ${fmtDateShort(r.job_order_date)}</span></div>
+      <div style="text-align:right;font-size:11px;"><b>Invoice/PO No./Date:</b> ${esc(r.invoice_po_no) || "—"} ${r.invoice_po_date ? "— " + fmtDateShort(r.invoice_po_date) : ""}<br><b>Supplier:</b> ${esc(r.supplier) || "—"}</div>
+    </div>
+    <table class="pf">
+      <thead><tr><th style="width:8%">Qty</th><th style="width:10%">Unit</th><th style="width:42%">Spare parts / Materials and Labor</th><th style="width:15%">Cost</th><th style="width:25%">Remarks</th></tr></thead>
+      <tbody>
+        ${lines.length ? lines.map(l => `<tr><td class="num">${l.qty || ""}</td><td>${esc(l.unit)}</td><td>${esc(l.description)}</td><td class="num">${fmtNum(l.cost)}</td><td>${esc(l.remarks)}</td></tr>`).join("")
+          : `<tr><td colspan="5" class="subtle" style="text-align:center;">No spare parts/materials logged for this Job Order.</td></tr>`}
+        <tr><td colspan="3" style="text-align:right;font-weight:bold;">SUBTOTAL</td><td class="num" style="font-weight:bold;">${fmtNum(r.total_cost)}</td><td></td></tr>
+      </tbody>
+    </table>`;
+}
 /** Printed form — same look-and-feel wrapper as parIcsPrintHtml (Times New Roman, .sig footer
  *  columns), reworked into the Job Order + Spareparts layout from the client's own paper History
- *  of Repair form (HISTORY_OF_REPAIR.pdf) rather than the PAR/ICS receipt layout. */
-function horHtml(r) {
-  const a = S.assets.get(r.asset_id);
-  const lines = r.spareparts || [];
-  const totalRows = 12;
-  const blankRows = Math.max(0, totalRows - lines.length);
+ *  of Repair form (HISTORY_OF_REPAIR.pdf). Prints EVERY repair record on file for this asset (item
+ *  5, Sept 2026), oldest first, each as its own Job Order block, followed by one grand total and one
+ *  signature block (the most recent record's signatories) — a real ledger of the item's whole repair
+ *  history, not a single Job Order receipt. The asset's own current data (not any one record's
+ *  possibly-stale copy of it) is what's shown in the shared header, since that's the single source
+ *  of truth for Property No./Date acquired/End User/Make & Model — see the auto-fill in
+ *  openHorModal(). */
+function horHtml(assetId) {
+  const a = S.assets.get(assetId);
+  const records = historyRecordsForAsset(assetId);
+  const latest = records[records.length - 1] || {};
+  const grandTotal = round2(records.reduce((s, r) => s + (r.total_cost || 0), 0));
   return `
     <div class="form">
       <div class="head">
@@ -3536,48 +3692,39 @@ function horHtml(r) {
         <h2>HISTORY OF REPAIR</h2>
       </div>
       <div class="fieldrow" style="display:flex;gap:10px;">
-        <div class="infoline" style="flex:1;"><b>Make &amp; Model :</b><span class="val">${esc(r.make_model)}</span></div>
-        <div class="infoline" style="flex:1;"><b>Unit/Serial No. :</b><span class="val">${esc(r.unit_serial_no)}</span></div>
+        <div class="infoline" style="flex:1;"><b>Make &amp; Model :</b><span class="val">${esc((a && a.description) || latest.make_model)}</span></div>
+        <div class="infoline" style="flex:1;"><b>Unit/Serial No. :</b><span class="val">${esc(latest.unit_serial_no)}</span></div>
       </div>
       <div class="fieldrow" style="display:flex;gap:10px;">
-        <div class="infoline" style="flex:1;"><b>Engine Serial No. :</b><span class="val">${esc(r.engine_serial_no)}</span></div>
-        <div class="infoline" style="flex:1;"><b>Plate No. :</b><span class="val">${esc(r.plate_no)}</span></div>
+        <div class="infoline" style="flex:1;"><b>Engine Serial No. :</b><span class="val">${esc(latest.engine_serial_no)}</span></div>
+        <div class="infoline" style="flex:1;"><b>Plate No. :</b><span class="val">${esc(latest.plate_no)}</span></div>
       </div>
       <div class="fieldrow" style="display:flex;gap:10px;">
-        <div class="infoline" style="flex:1;"><b>Property No. :</b><span class="val">${esc(r.property_no) || (a ? esc(a.property_id || a.sen) : "")}</span></div>
-        <div class="infoline" style="flex:1;"><b>Date :</b><span class="val">${fmtDateShort(r.date)}</span></div>
+        <div class="infoline" style="flex:1;"><b>Property No. :</b><span class="val">${esc((a && (a.property_id || a.sen)) || latest.property_no)}</span></div>
+        <div class="infoline" style="flex:1;"><b>Date acquired :</b><span class="val">${fmtDateShort(a && a.date_acquired)}</span></div>
       </div>
       <div class="fieldrow" style="display:flex;gap:10px;">
-        <div class="infoline" style="flex:1;"><b>End User :</b><span class="val">${esc(r.end_user)}</span></div>
-        <div class="infoline" style="flex:1;"><b>Designation :</b><span class="val">${esc(r.designation)}</span></div>
+        <div class="infoline" style="flex:1;"><b>End User :</b><span class="val">${esc((a && a.accountable_officer) || latest.end_user)}</span></div>
+        <div class="infoline" style="flex:1;"><b>Designation :</b><span class="val">${esc(latest.designation)}</span></div>
       </div>
-      <div class="infoline"><b>Office :</b><span class="val">${esc(r.office)}</span></div>
-      <div class="headrow">
-        <div class="infoline" style="flex:1;margin-bottom:0;"><b>Job Order No./Date :</b><span class="val">${esc(r.job_order_no)} — ${fmtDateShort(r.job_order_date)}</span></div>
-        <div style="text-align:right;font-size:11px;"><b>Invoice/PO No./Date:</b> ${esc(r.invoice_po_no) || "—"} ${r.invoice_po_date ? "— " + fmtDateShort(r.invoice_po_date) : ""}<br><b>Supplier:</b> ${esc(r.supplier) || "—"}</div>
-      </div>
-      <table class="pf">
-        <thead><tr><th style="width:8%">Qty</th><th style="width:10%">Unit</th><th style="width:42%">Spare parts / Materials and Labor</th><th style="width:15%">Cost</th><th style="width:25%">Remarks</th></tr></thead>
-        <tbody>
-          ${lines.map(l => `<tr><td class="num">${l.qty || ""}</td><td>${esc(l.unit)}</td><td>${esc(l.description)}</td><td class="num">${fmtNum(l.cost)}</td><td>${esc(l.remarks)}</td></tr>`).join("")}
-          <tr><td colspan="3" style="text-align:right;font-weight:bold;">TOTAL</td><td class="num" style="font-weight:bold;">${fmtNum(r.total_cost)}</td><td></td></tr>
-          ${Array.from({ length: blankRows }).map(() => `<tr class="blank"><td></td><td></td><td></td><td></td><td></td></tr>`).join("")}
-        </tbody>
-      </table>
+      <div class="infoline"><b>Office :</b><span class="val">${esc((a && a.location) || latest.office)}</span></div>
+      ${records.length ? records.map(horJobOrderBlockHtml).join("")
+        : `<p class="subtle" style="margin-top:14px;">No repair Job Orders logged for this item yet.</p>`}
+      ${records.length > 1 ? `<table class="pf" style="margin-top:4px;"><tbody><tr><td style="width:75%;text-align:right;font-weight:bold;border:none;">GRAND TOTAL — ALL REPAIRS</td><td class="num" style="width:25%;font-weight:bold;border:none;">${fmtNum(grandTotal)}</td></tr></tbody></table>` : ""}
       <div class="sig">
         <div class="col">
           <div class="who">Prepared by:</div>
-          <div class="pos">${esc(r.prepared_by) || "&nbsp;"}</div>
+          <div class="pos">${esc(latest.prepared_by) || "&nbsp;"}</div>
           <div class="poscap">Motorpool Coordinator - Designate</div>
         </div>
         <div class="col">
           <div class="who">Verified by:</div>
-          <div class="pos">${esc(r.verified_by) || "&nbsp;"}</div>
+          <div class="pos">${esc(latest.verified_by) || "&nbsp;"}</div>
           <div class="poscap">Inspection Incharge</div>
         </div>
         <div class="col">
           <div class="who">Noted by:</div>
-          <div class="pos">${esc(r.noted_by) || "&nbsp;"}</div>
+          <div class="pos">${esc(latest.noted_by) || "&nbsp;"}</div>
           <div class="poscap">Municipal Mayor</div>
         </div>
       </div>
@@ -3586,7 +3733,9 @@ function horHtml(r) {
 function printHor(id) {
   const r = S.historyOfRepair.get(id);
   if (!r) return;
-  openPrintWindow("History of Repair", parIcsPrintHtml("History of Repair " + (r.job_order_no || ""), horHtml(r)));
+  const a = S.assets.get(r.asset_id);
+  const label = (a && (a.property_id || a.sen)) || r.property_no || "";
+  openPrintWindow("History of Repair", parIcsPrintHtml("History of Repair " + label, horHtml(r.asset_id)));
 }
 
 /* ============================================================
@@ -4334,20 +4483,24 @@ function buildingComponentAmounts(asset) {
   if (!bc) return [];
   return [bc.building, bc.aircon, bc.elevators, bc.others];
 }
-/** Item 9 (Sept 2026, Road Network real-data import): the client's own source spreadsheet keeps
- *  the Road Lot (land under the road, never depreciated) and Pavement (the depreciable structure)
- *  as separate figures, even though both are booked under the single Road Networks account
- *  (10703010). This app has one Cost/Accumulated Depreciation schedule per asset, so instead of
- *  a second ledger, the land value is protected from ever being depreciated away by folding it
- *  into `residual_value` (see the Road Network bulk import below: residual_value = road_lot_value
- *  + 5% of the pavement cost) — the schedule then depreciates only the pavement portion, exactly
- *  as the source spreadsheet does. `road_lot_value`/`road_pavement_value` are kept purely so the
- *  printed card can show a real Pavement figure under component B instead of a blank placeholder
- *  row (component A's own row already carries the full combined cost via the real timeline, same
- *  convention as buildingComponentAmounts() above). */
+/** Item 9 (Sept 2026, Road Network real-data import), corrected by item 6 (Sept 2026): a road's
+ *  cost is booked in up to four categories under the single Road Networks account (10703010) —
+ *  A. Road Lot (land, never depreciated), B. Pavement, C. Drainage and Slope Protection Structures,
+ *  D. Other Miscellaneous Structures. This app has one Cost/Accumulated Depreciation schedule per
+ *  asset, so instead of a second ledger, the Road Lot value is protected from ever being depreciated
+ *  away by folding it into `residual_value` (residual_value = road_lot_value, exactly — see
+ *  isZeroResidualAccount()/defaultResidualFor() near the top of this file and the Road Network bulk
+ *  import below) — the schedule then depreciates only B+C+D, at zero residual, matching the
+ *  government's "Infrastructure Assets carry zero residual value" policy. `road_lot_value` /
+ *  `road_pavement_value` / `road_drainage_value` / `road_other_value` are kept purely so the printed
+ *  card can show each category's own real figure instead of a blank placeholder row (component A's
+ *  own row already carries the full combined cost via the real timeline, same convention as
+ *  buildingComponentAmounts() above) — a real 0 once a category is actually tracked prints as
+ *  "0.00"; a category never entered at all (an older road predating this split) still prints blank. */
 function roadComponentAmounts(asset) {
-  if (asset.road_pavement_value == null) return [];
-  return [null, asset.road_pavement_value, null, null];
+  if (asset.road_pavement_value == null && asset.road_lot_value == null) return [];
+  const orNull = v => v != null ? v : null;
+  return [null, orNull(asset.road_pavement_value), orNull(asset.road_drainage_value), orNull(asset.road_other_value)];
 }
 
 function openPrintWindow(title, html) {
@@ -6077,6 +6230,10 @@ function bindStaticUI() {
   document.querySelectorAll("#fundSwitch button").forEach(b => b.addEventListener("click", () => setFund(b.dataset.fund)));
   const overlay = document.getElementById("modalOverlay");
   if (overlay) overlay.addEventListener("click", e => { if (e.target.id === "modalOverlay") closeModal(); });
+  // Escape closes whichever modal/mini-window is currently open (item 2, Sept 2026).
+  document.addEventListener("keydown", e => {
+    if (e.key === "Escape" && overlay && overlay.classList.contains("open")) closeModal();
+  });
   const changePwBtn = document.getElementById("changePasswordBtn");
   if (changePwBtn) changePwBtn.addEventListener("click", openChangePasswordModal);
 }
@@ -6114,7 +6271,7 @@ Object.assign(window, {
   openRevalueModal, revalueAsset,
   openTransferModal, transferAsset,
   removeAssetPhoto, removeAssetDocument, printAssetIdTag,
-  exportRegisterCsv, exportRetiredCsv, exportDepreciationDetailCsv, exportReportsCsv,
+  exportRegisterCsv, exportRetiredCsv, exportDepreciationDetailCsv, exportReportsCsv, deleteRetiredAsset,
   handleTbFileUpload,
   printLedgerCard, printPropertyCard, printLedgerCardsBulk, printPropertyCardsBulk,
   printLedgerCardsBulkReports, printPropertyCardsBulkReports,
