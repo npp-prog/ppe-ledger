@@ -73,32 +73,43 @@
   .brand .sub{ font-size:11px; color:var(--ink-faint); margin-top:2px; letter-spacing:.02em; }
 
   /* ---------- Fund switcher ---------- */
+  /* Vertical icon-card style (Sept 2026 follow-up) — was a horizontal pill-badge + text row per
+     fund; the client asked for something "more presentable, like vertical icons." Each fund is now
+     its own icon-over-label card (circular code badge on top, name centered below), the three cards
+     sitting side by side in a single row — like a compact icon toolbar — rather than one on top of
+     another, so the switcher reads as three self-contained tiles without tripling the sidebar's
+     vertical footprint (an earlier stacked-column version pushed the sidebar footer/sign-out area
+     off-screen on shorter windows). */
   #fundSwitch{
     padding:12px 10px; border-bottom:1px solid var(--line);
-    display:flex; flex-direction:column; gap:3px; background:var(--paper-sunken);
+    display:flex; flex-direction:row; gap:6px; background:var(--paper-sunken);
   }
   /* #fundSwitch (an ID, not just .fundswitch) so these rules always win over any generic
      `button{...}` reset elsewhere — the switcher should never fall back to bare browser button
      chrome (a bordered box, default bold text, no spacing) if something else loads after this file. */
   #fundSwitch button{
-    all:unset; box-sizing:border-box; cursor:pointer;
-    display:flex; align-items:center; gap:9px; width:100%;
-    padding:7px 10px; border-radius:8px;
-    color:var(--ink-soft); font-family:inherit; font-size:12.5px; font-weight:500; line-height:1.3;
-    transition:background .12s ease, color .12s ease;
+    all:unset; box-sizing:border-box; cursor:pointer; flex:1 1 0; min-width:0;
+    display:flex; flex-direction:column; align-items:center; text-align:center; gap:5px;
+    padding:8px 4px; border-radius:10px; border:1px solid transparent;
+    color:var(--ink-soft); font-family:inherit; font-size:10.5px; font-weight:600; line-height:1.2;
+    transition:background .12s ease, color .12s ease, border-color .12s ease;
   }
   #fundSwitch button .fundcode{
-    flex:none; display:inline-block; min-width:26px; text-align:center;
-    font-family:"Roboto Mono",monospace; font-size:9.5px; font-weight:700; letter-spacing:.03em;
-    color:var(--ink-faint); background:var(--paper-raised); border:1px solid var(--line);
-    border-radius:99px; padding:3px 7px; line-height:1.3;
+    flex:none; display:flex; align-items:center; justify-content:center;
+    width:30px; height:30px; border-radius:50%;
+    font-family:"Roboto Mono",monospace; font-size:10px; font-weight:700; letter-spacing:.03em;
+    color:var(--ink-faint); background:var(--paper-raised); border:1.5px solid var(--line);
   }
   #fundSwitch button .fundlabel{ white-space:normal; }
-  #fundSwitch button:hover{ background:var(--line-soft); color:var(--ink); }
-  #fundSwitch button.active{ background:var(--accent-soft); color:var(--accent-strong); font-weight:600; }
+  #fundSwitch button:hover{ background:var(--line-soft); color:var(--ink); border-color:var(--line); }
+  #fundSwitch button.active{ background:var(--accent-soft); color:var(--accent-strong); border-color:var(--accent-soft); }
   #fundSwitch button.active .fundcode{ color:#fff; background:var(--accent); border-color:var(--accent); }
 
-  nav{ padding:10px; display:flex; flex-direction:column; gap:2px; flex:1; }
+  /* overflow-y:auto + min-height:0 (the latter overrides flex's default min-height:auto, which
+     otherwise refuses to let a flex child shrink below its own content) so a tall nav list scrolls
+     within its own space instead of pushing .sidebar-foot (Change password / Sign out) below the
+     visible window on a short viewport — the sidebar itself is a fixed height:100vh, non-scrolling. */
+  nav{ padding:10px; display:flex; flex-direction:column; gap:2px; flex:1; overflow-y:auto; min-height:0; }
   nav button{
     text-align:left; padding:9px 12px; border-radius:8px; border:none; background:transparent;
     color:var(--ink-soft); font-size:13.5px; font-weight:500; cursor:pointer; display:flex;
@@ -246,7 +257,6 @@
     .brand .seal{ justify-content:center; }
     nav button{ justify-content:center; }
     #fundSwitch button .fundlabel{ display:none; }
-    #fundSwitch button{ justify-content:center; }
     .fieldrow,.fieldrow3{ grid-template-columns:1fr; }
   }
 /* ---------- Sign-in screen ---------- */
