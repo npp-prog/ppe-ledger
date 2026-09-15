@@ -999,13 +999,14 @@ function renderRegister() {
         <button class="btn primary" onclick="openAssetModal()">+ Add item</button>` : ""}
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
-        <thead><tr><th>Type</th><th>Property/SEN</th><th>Category</th><th>Description</th><th>Location</th><th class="num">Cost</th><th class="num">Accum. Depr.</th><th class="num">Carrying</th><th>Classification</th><th>Status</th></tr></thead>
+        <thead><tr><th>Type</th><th>Property/SEN</th><th>DV/Ref No.</th><th>Category</th><th>Description</th><th>Location</th><th class="num">Cost</th><th class="num">Accum. Depr.</th><th class="num">Carrying</th><th>Classification</th><th>Status</th></tr></thead>
         <tbody>${rows.length ? rows.map(a => {
           const sx = itemTypeOf(a) === "sx";
           return `
           <tr class="clickable" onclick="openAssetDetail('${a.id}')">
             <td>${sx ? '<span class="pill neutral">SX</span>' : '<span class="pill good">PPE</span>'}</td>
             <td class="mono">${esc(a.property_id) || "—"}</td>
+            <td class="mono truncate" title="${esc(a.dv_number)}">${esc(a.dv_number) || "—"}</td>
             <td>${esc(a.account_name) || '<span class="subtle">— none —</span>'}</td>
             <td class="truncate" title="${esc(a.description)}">${esc(a.description) || "—"}</td>
             <td class="truncate" title="${esc(a.location)}">${esc(a.location) || "—"}</td>
@@ -1015,7 +1016,7 @@ function renderRegister() {
             <td>${sx ? sxClassificationPill(sxClassificationOf(a)) : '<span class="subtle">—</span>'}</td>
             <td>${a.status === "retired" ? '<span class="pill neutral">Retired</span>' : '<span class="pill good">Active</span>'}</td>
           </tr>`;
-        }).join("") : `<tr><td colspan="10"><div class="empty">No items match these filters.</div></td></tr>`}
+        }).join("") : `<tr><td colspan="11"><div class="empty">No items match these filters.</div></td></tr>`}
         </tbody>
       </table></div></div>
     </div>
@@ -1067,10 +1068,10 @@ function filterAssetRows(f) {
 function filteredRegisterRows() { return filterAssetRows(S.registerFilter); }
 function exportRegisterCsv() {
   const rows = filteredRegisterRows();
-  const out = [["Fund", "Type", "Property ID", "SEN", "Category", "Description", "Location", "Accountable Officer", "Date Acquired", "Cost", "Residual Value", "Useful Life (yrs)", "Accum. Depr.", "Carrying Amount", "Classification", "Status"]];
+  const out = [["Fund", "Type", "Property ID", "SEN", "DV No./Reference", "Category", "Description", "Location", "Accountable Officer", "Date Acquired", "Cost", "Residual Value", "Useful Life (yrs)", "Accum. Depr.", "Carrying Amount", "Classification", "Status"]];
   rows.forEach(a => {
     const sx = itemTypeOf(a) === "sx";
-    out.push([fundLabel(a.fund || "GF"), sx ? "Semi-Expendable" : "PPE", a.property_id || "", a.sen || "", a.account_name || "", a.description || "", a.location || "", a.accountable_officer || "",
+    out.push([fundLabel(a.fund || "GF"), sx ? "Semi-Expendable" : "PPE", a.property_id || "", a.sen || "", a.dv_number || "", a.account_name || "", a.description || "", a.location || "", a.accountable_officer || "",
       a.date_acquired || "", (a.cost || 0).toFixed(2), (a.residual_value || 0).toFixed(2), a.useful_life_years || "",
       a.depreciable ? currentAccumDepr(a).toFixed(2) : "n/a", carryingAmount(a).toFixed(2), sx ? sxClassificationLabel(sxClassificationOf(a)) : "", a.status || ""]);
   });
@@ -1131,12 +1132,12 @@ function openAssetModal(existingId, initialType, prefill) {
 
       <div id="f_block_ppe_account">
         <div class="field"><label>Account / Category</label>
-          <select id="f_account">${assetCategoryOptions(a && itemType === "ppe" ? a.account_code : null)}</select></div>
-        <div id="f_block_special">${itemType === "ppe" ? specialCardFieldsHtml(specialCardGroupFor(a ? a.account_code : null), a) : ""}</div>
+          <select id="f_account">${assetCategoryOptions(a ? (itemType === "ppe" ? a.account_code : null) : (pf.account_code || null))}</select></div>
+        <div id="f_block_special">${itemType === "ppe" ? specialCardFieldsHtml(specialCardGroupFor(a ? a.account_code : (pf.account_code || null)), a) : ""}</div>
       </div>
       <div id="f_block_sx_account" style="display:none;">
         <div class="fieldrow">
-          <div class="field"><label>Account</label><select id="f_sx_account">${sxAccountCategoryOptions(a && itemType === "sx" ? a.account_code : "")}</select></div>
+          <div class="field"><label>Account</label><select id="f_sx_account">${sxAccountCategoryOptions(a ? (itemType === "sx" ? a.account_code : "") : (pf.account_code || ""))}</select></div>
           <div class="field"><label>Semi-Expendable Number (SEN)</label><input id="f_sx_sen" value="${esc(a ? a.sen : (pf.sen || ""))}" placeholder="e.g. SPHV-2020-12-0001"></div>
         </div>
       </div>
@@ -1185,7 +1186,10 @@ function openAssetModal(existingId, initialType, prefill) {
         </div>
       </div>
 
-      <div class="field"><label>PAR / DV reference / Remarks</label><input id="f_remarks" value="${esc(a ? a.remarks : (pf.remarks || ""))}" placeholder="e.g. PAR No. 2026-01-0004"></div>
+      <div class="fieldrow">
+        <div class="field"><label>DV No. / Reference (Accounting)</label><input id="f_dvno" value="${esc(a ? a.dv_number : (pf.dv_number || ""))}" placeholder="e.g. DV No. 2026-09-0123"></div>
+        <div class="field"><label>PAR reference / Remarks</label><input id="f_remarks" value="${esc(a ? a.remarks : (pf.remarks || ""))}" placeholder="e.g. PAR No. 2026-01-0004"></div>
+      </div>
       <div class="fieldrow">
         <div class="field"><label>How was this item acquired?</label>
           <select id="f_acqtype">${ACQUISITION_TYPES.map(t => `<option value="${t.code}" ${(a ? (a.acquisition_type || "purchased") : "purchased") === t.code ? "selected" : ""}>${esc(t.label)}</option>`).join("")}</select>
@@ -1301,6 +1305,7 @@ async function saveAsset(existingId) {
   const location = document.getElementById("f_loc").value.trim();
   const officer = document.getElementById("f_officer").value.trim();
   const remarks = document.getElementById("f_remarks").value.trim();
+  const dvNumber = document.getElementById("f_dvno").value.trim();
   const acquisitionType = document.getElementById("f_acqtype").value;
   const acquisitionSource = acquisitionType === "purchased" ? "" : document.getElementById("f_acqsource").value.trim();
 
@@ -1319,7 +1324,7 @@ async function saveAsset(existingId) {
       description,
       location,
       accountable_officer: officer,
-      remarks,
+      remarks, dv_number: dvNumber,
       acquisition_type: acquisitionType,
       acquisition_source: acquisitionSource,
       cost, residual_value: round2(Number(document.getElementById("f_residual").value) || 0),
@@ -1351,7 +1356,7 @@ async function saveAsset(existingId) {
       qty: Number(document.getElementById("f_sx_qty").value) || 1,
       unit_cost: round2(Number(document.getElementById("f_sx_unitcost").value) || 0),
       cost,
-      remarks,
+      remarks, dv_number: dvNumber,
       acquisition_type: acquisitionType,
       acquisition_source: acquisitionSource,
       prior_adjustment: round2(Number(document.getElementById("f_sx_prioradj").value) || 0),
@@ -1479,6 +1484,7 @@ function openAssetDetail(id) {
         <dt>Date acquired</dt><dd>${fmtDate(a.date_acquired)}</dd>
         <dt>How acquired</dt><dd>${esc(acquisitionTypeLabel(a.acquisition_type))}${a.acquisition_type && a.acquisition_type !== "purchased" && a.acquisition_source ? " — " + esc(a.acquisition_source) : ""}</dd>
         ${isSx ? `<dt>Classification</dt><dd>${sxClassificationPill(sxClassificationOf(a))}</dd>` : `<dt>Reference</dt><dd>${esc(a.remarks) || "—"}</dd>`}
+        <dt>DV No. / Reference (Accounting)</dt><dd class="mono">${esc(a.dv_number) || "—"}</dd>
         <dt>Status</dt><dd>${a.status === "retired" ? '<span class="pill neutral">Retired</span>' : '<span class="pill good">Active</span>'}</dd>
       </div>
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
@@ -1905,8 +1911,8 @@ function openBulkAddModal() {
     <div class="modal-body">
       <p class="subtle">These will be added as <b>PPE</b> to <b>${esc(fundLabel(S.currentFund))}</b> — switch funds in the sidebar first if that's not right. For Semi-Expendable Property, use "Bulk add Semi-Expendable (paste)" instead — it takes a different set of columns.</p>
       <p class="subtle">Upload a CSV file, or paste rows copied from a spreadsheet — one asset per line, columns in this order:</p>
-      <p class="mono subtle" style="font-size:11.5px;">account_code, property_id, date_acquired (YYYY-MM-DD), description, location, accountable_officer, cost, residual_value, useful_life_years, accum_depr_baseline (optional)</p>
-      <p class="subtle" style="font-size:12px;">The last column is optional — leave it off entirely for newly acquired items (starts at 0, depreciates forward from date_acquired). Fill it in only for a <b>pre-existing</b> asset that was already partly or fully depreciated before ${esc(periodLabel(BASELINE_PERIOD))} — e.g. importing older SEF/Trust Fund records — with the Php amount already accumulated as of that date.</p>
+      <p class="mono subtle" style="font-size:11.5px;">account_code, property_id, date_acquired (YYYY-MM-DD), description, location, accountable_officer, cost, residual_value, useful_life_years, accum_depr_baseline (optional), dv_number (optional)</p>
+      <p class="subtle" style="font-size:12px;">accum_depr_baseline — leave it off entirely for newly acquired items (starts at 0, depreciates forward from date_acquired). Fill it in only for a <b>pre-existing</b> asset that was already partly or fully depreciated before ${esc(periodLabel(BASELINE_PERIOD))} — e.g. importing older SEF/Trust Fund records — with the Php amount already accumulated as of that date. dv_number — the DV No. or other Accounting reference number for this item, if you have one; leave blank if not.</p>
       <div class="field" style="margin-top:10px;">
         <label>CSV file</label>
         <input type="file" id="bulkFile" accept=".csv,text/csv">
@@ -1969,7 +1975,7 @@ async function submitBulkAdd() {
   if (!rows.length) return toast("No valid rows found.");
   let added = 0;
   for (const cols of rows) {
-    const [code, propid, date, desc, loc, officer, cost, residual, life, baselineAd] = cols;
+    const [code, propid, date, desc, loc, officer, cost, residual, life, baselineAd, dvNumber] = cols;
     const info = accountInfo(Number(code));
     const c = round2(Number(cost) || 0);
     if (c <= 0) continue;
@@ -1979,7 +1985,7 @@ async function submitBulkAdd() {
       account_code: Number(code), account_name: info.name, ad_account_code: Number(code) + 1,
       dep_exp_account_code: info.expCode, dep_exp_account_name: info.expName,
       property_id: propid || "", date_acquired: date || null, description: desc || "",
-      location: loc || "", accountable_officer: officer || "", remarks: "",
+      location: loc || "", accountable_officer: officer || "", remarks: "", dv_number: dvNumber || "",
       cost: c, residual_value: round2(Number(residual) || defaultResidualFor(Number(code), c)), useful_life_years: Number(life) || 0,
       depreciable: !!info.depreciable, status: "active", accum_depr_baseline: round2(Number(baselineAd) || 0),
       source_sheet: "Bulk import", updated_by: viewerLabel(), updated_at: new Date().toISOString(),
@@ -4166,7 +4172,10 @@ function assetEventTimeline(asset) {
     : "";
   events.push({
     date: asset.date_acquired || "", kind: "acquire",
-    label: "Acquisition", reference: [asset.remarks, acqNote].filter(Boolean).join(" — "),
+    // dv_number (a dedicated Accounting reference field, Sept 2026 follow-up) leads when present,
+    // since it's the cleaner, purpose-built reference — remarks is kept alongside it rather than
+    // replaced, since older assets often have their real reference sitting in remarks instead.
+    label: "Acquisition", reference: [asset.dv_number, asset.remarks, acqNote].filter(Boolean).join(" — "),
   });
   if (asset.accum_depr_baseline) {
     events.push({
@@ -4851,7 +4860,7 @@ function filterParIcsRows(f) {
  *  parking records became which register items. */
 function exportParIcsCsv() {
   const rows = filterParIcsRows(S.parIcsFilter);
-  const out = [["Fund", "Type", "Number", "Property No./SEN", "Date Issued", "Dept/Office or Entity", "Description", "Qty", "Unit", "Amount", "Status", "Recorded At"]];
+  const out = [["Fund", "Type", "Number", "Property No./SEN", "Account Code", "Account Name", "Date Issued", "Dept/Office or Entity", "Description", "Qty", "Unit", "Amount", "Status", "Recorded At"]];
   rows.forEach(r => {
     const isPar = r.doc_type === "par";
     const recordedAsset = r.recorded_asset_id ? S.assets.get(r.recorded_asset_id) : null;
@@ -4861,6 +4870,7 @@ function exportParIcsCsv() {
     const propNo = recordedAsset ? (isPar ? recordedAsset.property_id : recordedAsset.sen) : (isPar ? r.property_number : r.item_no);
     out.push([
       fundLabel(r.fund || "GF"), isPar ? "PAR (PPE)" : "ICS (Semi-Expendable)", r.number || "", propNo || "",
+      r.account_code || "", r.account_name || "",
       r.date || "", (isPar ? r.dept_office : r.entity_name) || "", r.description || "",
       r.qty || 1, r.unit || "", (isPar ? r.amount : r.cost || 0).toFixed(2),
       r.recorded ? "Recorded" : "Pending",
@@ -4899,7 +4909,7 @@ function renderParIcs() {
         <button class="btn primary" onclick="openIcsModal()">+ New ICS (Semi-Expendable)</button>` : ""}
       </div>
       <div class="panel-body flush"><div class="tablewrap"><table>
-        <thead><tr><th>Type</th><th>Number</th><th>Property No./SN</th><th>Dept/Office &amp; Entity</th><th>Description</th><th class="num">Qty</th><th class="num">Amount</th><th>Date</th><th>Status</th><th style="width:230px;">Actions</th></tr></thead>
+        <thead><tr><th>Type</th><th>Number</th><th>Property No./SN</th><th>Account</th><th>Dept/Office &amp; Entity</th><th>Description</th><th class="num">Qty</th><th class="num">Amount</th><th>Date</th><th>Status</th><th style="width:230px;">Actions</th></tr></thead>
         <tbody>${rows.length ? rows.map(r => {
           const isPar = r.doc_type === "par";
           const recordedAsset = r.recorded_asset_id ? S.assets.get(r.recorded_asset_id) : null;
@@ -4911,6 +4921,7 @@ function renderParIcs() {
             <td>${isPar ? '<span class="pill good">PAR</span>' : '<span class="pill neutral">ICS</span>'}</td>
             <td class="mono">${esc(r.number)}</td>
             <td class="mono">${esc(propNo) || "—"}</td>
+            <td class="truncate" title="${esc(r.account_name)}">${r.account_code ? `<span class="mono">${r.account_code}</span> ${esc(r.account_name)}` : '<span class="subtle">—</span>'}</td>
             <td class="truncate" title="${esc(isPar ? r.dept_office : r.entity_name)}">${esc(isPar ? r.dept_office : r.entity_name) || "—"}</td>
             <td class="truncate" title="${esc(r.description)}">${esc(r.description) || "—"}</td>
             <td class="num mono">${r.qty || 1}</td>
@@ -4927,7 +4938,7 @@ function renderParIcs() {
                    <button class="btn small danger" onclick="deleteParIcs('${r.id}')">Delete</button>` : ""}
             </td>
           </tr>`;
-        }).join("") : `<tr><td colspan="10"><div class="empty">No PAR/ICS records match these filters.</div></td></tr>`}
+        }).join("") : `<tr><td colspan="11"><div class="empty">No PAR/ICS records match these filters.</div></td></tr>`}
         </tbody>
       </table></div></div>
     </div>
@@ -4951,7 +4962,10 @@ function openParModal(existingId) {
         <div class="field"><label>PAR No. <span class="subtle" style="font-weight:400;">(pre-filled, edit if needed)</span></label><input id="p_number" class="mono" value="${esc(r ? r.number : nextParNumber(fund, new Date().toISOString().slice(0, 10)))}" placeholder="YYYY-MM-NNNN"></div>
         <div class="field"><label>Date issued</label><input type="date" id="p_date" value="${r ? r.date : new Date().toISOString().slice(0, 10)}"></div>
       </div>
-      <div class="field"><label>Dept/Office</label><input id="p_dept" value="${esc(r ? r.dept_office : "")}" placeholder="e.g. Office of the Municipal Treasurer"></div>
+      <div class="fieldrow">
+        <div class="field"><label>Dept/Office</label><input id="p_dept" value="${esc(r ? r.dept_office : "")}" placeholder="e.g. Office of the Municipal Treasurer"></div>
+        <div class="field"><label>Account Code <span class="subtle" style="font-weight:400;">(the account this item will be recorded under)</span></label><select id="p_account">${assetCategoryOptions(r ? r.account_code : null)}</select></div>
+      </div>
       <div class="fieldrow3">
         <div class="field"><label>Quantity</label><input type="number" step="1" id="p_qty" value="${r ? r.qty : 1}"></div>
         <div class="field"><label>Unit</label><input id="p_unit" value="${esc(r ? r.unit : "UNIT")}"></div>
@@ -4992,7 +5006,10 @@ function openIcsModal(existingId) {
         <div class="field"><label>ICS No. <span class="subtle" style="font-weight:400;">(pre-filled, edit if needed)</span></label><input id="i_number" class="mono" value="${esc(r ? r.number : "")}" placeholder="auto-assigned on save unless entered"></div>
         <div class="field"><label>Date issued</label><input type="date" id="i_date" value="${r ? r.date : new Date().toISOString().slice(0, 10)}"></div>
       </div>
-      <div class="field"><label>Entity Name</label><input id="i_entity" value="${esc(r ? r.entity_name : "")}" placeholder="e.g. MGO - CANDONI - ACCOUNTING OFFICE"></div>
+      <div class="fieldrow">
+        <div class="field"><label>Entity Name</label><input id="i_entity" value="${esc(r ? r.entity_name : "")}" placeholder="e.g. MGO - CANDONI - ACCOUNTING OFFICE"></div>
+        <div class="field"><label>Account Code <span class="subtle" style="font-weight:400;">(the account this item will be recorded under)</span></label><select id="i_account">${sxAccountCategoryOptions(r ? r.account_code : "")}</select></div>
+      </div>
       <div class="fieldrow3">
         <div class="field"><label>Quantity</label><input type="number" step="1" id="i_qty" value="${r ? r.qty : 1}"></div>
         <div class="field"><label>Unit</label><input id="i_unit" value="${esc(r ? r.unit : "UNIT")}"></div>
@@ -5054,8 +5071,11 @@ async function saveParIcs(docType, existingId) {
       const enteredNumber = document.getElementById("p_number").value.trim();
       const number = enteredNumber || (existing ? existing.number : nextParNumber(fund, date));
       if (parIcsNumberTaken(fund, "par", number, existingId)) return toast(`PAR No. ${number} is already used by another PAR in this fund.`);
+      const accountCode = Number(document.getElementById("p_account").value);
+      const accountInfoForPar = accountInfo(accountCode);
       const rec = {
         doc_type: "par", fund, date, number,
+        account_code: accountCode, account_name: accountInfoForPar.name,
         dept_office: deptOffice,
         qty: Number(document.getElementById("p_qty").value) || 1,
         unit: document.getElementById("p_unit").value.trim() || "UNIT",
@@ -5092,8 +5112,11 @@ async function saveParIcs(docType, existingId) {
       const enteredNumber = document.getElementById("i_number").value.trim();
       const number = enteredNumber || (existing ? existing.number : nextIcsNumber(fund, date, classification));
       if (parIcsNumberTaken(fund, "ics", number, existingId)) return toast(`ICS No. ${number} is already used by another ICS in this fund.`);
+      const icsAccountVal = document.getElementById("i_account").value;
+      const icsAccountCode = icsAccountVal ? Number(icsAccountVal) : null;
       const rec = {
         doc_type: "ics", fund, date, number,
+        account_code: icsAccountCode, account_name: icsAccountCode ? accountInfo(icsAccountCode).name : "",
         entity_name: entityName,
         qty: Number(document.getElementById("i_qty").value) || 1,
         unit: document.getElementById("i_unit").value.trim() || "UNIT",
@@ -5176,9 +5199,9 @@ function recordParIcsAsNew(id) {
         parIcsId: id, recordLabel: `PAR ${r.number}`, itemType: "ppe", fund: r.fund,
         property_id: r.property_number || "", date_acquired: r.date_acquired || r.date,
         description: fullDescription, location: r.dept_office, cost: r.amount,
-        residual_value: round2((r.amount || 0) * 0.05),
+        residual_value: defaultResidualFor(r.account_code, r.amount),
         accountable_officer: r.received_by_name || "",
-        remarks: `PAR No. ${r.number}`,
+        remarks: `PAR No. ${r.number}`, account_code: r.account_code || null,
       }
     : {
         parIcsId: id, recordLabel: `ICS ${r.number}`, itemType: "sx", fund: r.fund,
@@ -5186,7 +5209,7 @@ function recordParIcsAsNew(id) {
         description: fullDescription, location: r.entity_name,
         qty: r.qty, unit_cost: r.unit_cost, cost: r.cost, unit_of_measure: r.unit,
         accountable_officer: r.received_by_name || "",
-        sen: r.number, remarks: `ICS No. ${r.number}`,
+        sen: r.number, remarks: `ICS No. ${r.number}`, account_code: r.account_code || null,
       };
   openAssetModal(null, prefill.itemType, prefill);
 }
@@ -5916,10 +5939,10 @@ function renderReports() {
 }
 function exportReportsCsv() {
   const rows = filterAssetRows(S.reportsFilter);
-  const out = [["Fund", "Type", "Property/SEN", "Category", "Description", "Location", "Accountable Officer", "Date Acquired", "Cost", "Residual Value", "Useful Life (yrs)", "Accum. Depr.", "Carrying Amount", "Classification", "Status"]];
+  const out = [["Fund", "Type", "Property/SEN", "DV No./Reference", "Category", "Description", "Location", "Accountable Officer", "Date Acquired", "Cost", "Residual Value", "Useful Life (yrs)", "Accum. Depr.", "Carrying Amount", "Classification", "Status"]];
   rows.forEach(a => {
     const sx = itemTypeOf(a) === "sx";
-    out.push([fundLabel(a.fund || "GF"), sx ? "Semi-Expendable" : "PPE", a.property_id || "", a.account_name || "", a.description || "", a.location || "", a.accountable_officer || "",
+    out.push([fundLabel(a.fund || "GF"), sx ? "Semi-Expendable" : "PPE", a.property_id || "", a.dv_number || "", a.account_name || "", a.description || "", a.location || "", a.accountable_officer || "",
       a.date_acquired || "", (a.cost || 0).toFixed(2), (a.residual_value || 0).toFixed(2), a.useful_life_years || "",
       a.depreciable ? currentAccumDepr(a).toFixed(2) : "n/a", carryingAmount(a).toFixed(2), sx ? sxClassificationLabel(sxClassificationOf(a)) : "", a.status || ""]);
   });
@@ -6189,8 +6212,8 @@ function openSxBulkAddModal() {
     <div class="modal-body">
       <p class="subtle">These will be added as <b>Semi-Expendable Property</b> to <b>${esc(fundLabel(S.currentFund))}</b> — switch funds in the sidebar first if that's not right. For PPE, use "Bulk add PPE (paste)" instead — it takes a different set of columns.</p>
       <p class="subtle">Paste rows, or upload a CSV — one item per line, columns in this order:</p>
-      <p class="mono subtle" style="font-size:11px;">account_code, property_id, sen, description, article_type, location, accountable_officer, unit_of_measure, qty, unit_cost, cost, date_acquired (YYYY-MM-DD), remarks, prior_adjustment (optional)</p>
-      <p class="subtle" style="font-size:11.5px;">Classification (High/Low Value) is computed automatically from cost — no column for it. Leave account_code blank for an item that still needs one assigned (e.g. a "found at the station" item).</p>
+      <p class="mono subtle" style="font-size:11px;">account_code, property_id, sen, description, article_type, location, accountable_officer, unit_of_measure, qty, unit_cost, cost, date_acquired (YYYY-MM-DD), remarks, prior_adjustment (optional), dv_number (optional)</p>
+      <p class="subtle" style="font-size:11.5px;">Classification (High/Low Value) is computed automatically from cost — no column for it. Leave account_code blank for an item that still needs one assigned (e.g. a "found at the station" item). dv_number is the DV No. or other Accounting reference number, if you have one.</p>
       <div class="field" style="margin-top:10px;"><label>CSV file</label><input type="file" id="sxBulkFile" accept=".csv,text/csv"></div>
       <p class="subtle" style="font-size:12px;margin:10px 0 6px;">— or paste directly —</p>
       <div class="field"><textarea id="sxBulkPaste" rows="7"></textarea></div>
@@ -6235,7 +6258,7 @@ async function submitSxBulkAdd() {
   const fund = S.currentFund;
   let added = 0;
   for (const cols of rows) {
-    const [code, propid, sen, desc, article, loc, officer, uom, qty, unitCost, cost, date, remarks, prioradj] = cols;
+    const [code, propid, sen, desc, article, loc, officer, uom, qty, unitCost, cost, date, remarks, prioradj, dvNumber] = cols;
     const accountCode = code ? Number(code) : null;
     const info = accountCode ? accountInfo(accountCode) : null;
     await S.db.collection("assets").add({
@@ -6244,7 +6267,7 @@ async function submitSxBulkAdd() {
       property_id: propid || "", sen: sen || "", description: desc || "", article_type: article || "",
       location: loc || "", accountable_officer: officer || "", unit_of_measure: uom || "",
       qty: Number(qty) || 1, unit_cost: round2(Number(unitCost) || 0), cost: round2(Number(cost) || 0),
-      date_acquired: date || "", remarks: remarks || "", prior_adjustment: round2(Number(prioradj) || 0),
+      date_acquired: date || "", remarks: remarks || "", dv_number: dvNumber || "", prior_adjustment: round2(Number(prioradj) || 0),
       acquisition_type: "purchased", acquisition_source: "", depreciable: false, status: "active", ledger_entries: [], transfers: [],
       source_sheet: "Bulk import", updated_by: viewerLabel(), updated_at: new Date().toISOString(),
     });
