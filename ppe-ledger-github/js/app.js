@@ -1457,6 +1457,69 @@ async function submitRetire(id) {
   closeModal();
 }
 
+/** ---------- Reactivate a retired item (Sept 2026 follow-up) ----------
+ *  The mirror image of Retire, for correcting an item that was retired by mistake — moves it back
+ *  to Active in the Asset Register (so it's editable/depreciable/reportable again) rather than
+ *  requiring a brand-new item to be re-added from scratch. Like Retire, requires a reason (this is
+ *  an audit-sensitive correction, not routine housekeeping). The item's retirement details are never
+ *  erased silently — they're folded into a new `reactivations[]` history entry (previous_retired_at/
+ *  previous_retire_reason/etc.) so the full retire→reactivate cycle still shows up in the item's own
+ *  Activity history (see assetActivityHistory() below) even after the top-level retire_* fields are
+ *  cleared for the item's new Active state. Gated the same way Retire itself is (canEdit("register")/
+ *  blockIfViewOnly("register")), since this is what actually returns the item to the live register —
+ *  distinct from deleteRetiredAsset()'s canEdit("retired") gate, which only ever permanently removes
+ *  an item's history and never brings one back. */
+function openReviveModal(id) {
+  const a = S.assets.get(id);
+  if (!a || a.status !== "retired") return;
+  const today = new Date().toISOString().slice(0, 10);
+  openModal(`
+    <div class="modal-head"><h3>Reactivate item</h3><button class="iconbtn" onclick="closeModal()">✕</button></div>
+    <div class="modal-body">
+      <p style="margin-top:0;">${esc(a.account_name)} ${a.property_id || a.sen ? "— " + esc(a.property_id || a.sen) : ""}</p>
+      <p class="subtle" style="font-size:12.5px;">Moves this item back to Active in the Asset Register — for correcting an item that was retired in error. Its retirement stays on record in the item's Activity history below; nothing is erased.</p>
+      <div class="kv" style="margin-bottom:14px;">
+        <dt>Retired</dt><dd>${fmtDate(a.retired_at ? a.retired_at.slice(0, 10) : "")}</dd>
+        <dt>Reason</dt><dd>${esc(a.retire_reason) || "—"}</dd>
+        <dt>Detail</dt><dd>${esc(a.retire_detail) || "—"}</dd>
+      </div>
+      <div class="fieldrow">
+        <div class="field"><label>Effective date</label><input type="date" id="rv2_date" value="${today}"></div>
+      </div>
+      <div class="field"><label>Reason for reactivating</label><textarea id="rv2_reason" rows="2" placeholder="e.g. Retired in error — item was found / still in active use"></textarea></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn primary" onclick="reviveAsset('${a.id}')">Reactivate</button>
+    </div>
+  `);
+}
+async function reviveAsset(id) {
+  if (!S.db) return toast("No shared database in this view.");
+  if (blockIfViewOnly("register")) return;
+  const a = S.assets.get(id);
+  if (!a || a.status !== "retired") return;
+  const reason = document.getElementById("rv2_reason").value.trim();
+  if (!reason) return toast("Enter a reason for reactivating this item.");
+  const date = document.getElementById("rv2_date").value || new Date().toISOString().slice(0, 10);
+  const entry = {
+    date, reason, by: viewerLabel(), at: new Date().toISOString(),
+    previous_retired_at: a.retired_at || "", previous_retired_by: a.retired_by || "",
+    previous_retire_reason: a.retire_reason || "", previous_retire_detail: a.retire_detail || "",
+    previous_retire_reference: a.retire_reference || "",
+  };
+  try {
+    await S.db.collection("assets").doc(id).update({
+      status: "active",
+      retired_at: null, retired_by: null, retire_reason: null, retire_detail: null, retire_reference: null,
+      reactivations: [...(a.reactivations || []), entry],
+      updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+    });
+    toast("Item reactivated — back in the active Asset Register.");
+    closeModal();
+  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+}
+
 /** Unified asset-detail modal for BOTH item types — branches on itemTypeOf(a) for which financial
  *  kv block shows (PPE's cost/residual/useful-life/depreciation vs Semi-Expendable's cost/prior
  *  adjustment/impairment/adjusted cost) and which action buttons appear (Revalue is PPE-only, Add
@@ -1511,22 +1574,18 @@ function openAssetDetail(id) {
         <dt>Detail</dt><dd>${esc(a.retire_detail) || "—"}</dd>
         <dt>Reference</dt><dd>${esc(a.retire_reference) || "—"}</dd>
       </div>` : ""}
-      ${a.ledger_entries && a.ledger_entries.length ? `
+      ${(() => {
+        const hist = assetActivityHistory(a);
+        if (!hist.length) return "";
+        return `
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
-      <label style="margin-bottom:6px;">Ledger history</label>
+      <label style="margin-bottom:6px;">Activity history</label>
       <div class="kv" style="font-size:12.5px;grid-template-columns:110px 1fr;">
-        ${a.ledger_entries.slice().reverse().map(e => `<dt class="mono">${fmtDate(e.date)}</dt><dd>${e.type === "adjustment" ? "Adjustment " + fmtMoney(e.amount) : e.type === "impairment" ? "Impairment loss " + fmtMoney(Math.abs(e.amount)) : "Repair — " + fmtMoney(e.amount)}${e.note ? ": " + esc(e.note) : ""} <span class="subtle">(${esc(e.by || "")})</span></dd>`).join("")}
-      </div>` : ""}
-      ${!isSx && a.revaluations && a.revaluations.length ? (() => {
-        const last = a.revaluations[a.revaluations.length - 1];
-        return `<p class="subtle" style="font-size:11.5px;margin-top:12px;">Revalued ${a.revaluations.length} time(s) — last ${fmtDate(last.date)}: ${fmtMoney(last.old_cost)} &rarr; ${fmtMoney(last.new_cost)}${last.reason ? " (" + esc(last.reason) + ")" : ""}</p>`;
-      })() : ""}
-      ${a.transfers && a.transfers.length ? (() => {
-        const last = a.transfers[a.transfers.length - 1];
-        return `<p class="subtle" style="font-size:11.5px;margin-top:6px;">Transferred ${a.transfers.length} time(s) — last ${fmtDate(last.date)}: ${esc(last.old_location || "—")} &rarr; ${esc(last.new_location || "—")}${last.reason ? " (" + esc(last.reason) + ")" : ""}</p>`;
-      })() : ""}
+        ${hist.map(e => `<dt class="mono">${fmtDate(e.date)}</dt><dd>${esc(e.text)} <span class="subtle">(${esc(e.by || "—")})</span></dd>`).join("")}
+      </div>`;
+      })()}
       ${a.remarks && isSx ? `<p class="subtle" style="font-size:11.5px;margin-top:6px;">Remarks: ${esc(a.remarks)}</p>` : ""}
-      ${a.source_sheet ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">Source: ${esc(a.source_sheet)}${a.updated_by ? " • last edited by " + esc(a.updated_by) : ""}</p>` : ""}
+      ${a.source_sheet || a.updated_by ? `<p class="subtle" style="font-size:11.5px;margin-top:12px;">${a.source_sheet ? "Source: " + esc(a.source_sheet) : ""}${a.source_sheet && a.updated_by ? " • " : ""}${a.updated_by ? "Last edited by " + esc(a.updated_by) + (a.updated_at ? " on " + fmtDate(a.updated_at.slice(0, 10)) : "") : ""}</p>` : ""}
       <hr style="border:none;border-top:1px solid var(--line-soft);margin:14px 0;">
       <label style="margin-bottom:6px;">Attachments</label>
       <div class="fieldrow" style="align-items:flex-start;">
@@ -1553,6 +1612,7 @@ function openAssetDetail(id) {
     </div>
     <div class="modal-foot">
       ${a.status === "active" && canEdit("register") ? `<button class="btn danger" style="margin-right:auto" onclick="openRetireModal('${a.id}')">Retire</button>` : ""}
+      ${a.status === "retired" && canEdit("register") ? `<button class="btn" style="margin-right:auto" onclick="openReviveModal('${a.id}')">↩ Reactivate</button>` : ""}
       <button class="btn ghost" onclick="closeModal()">Close</button>
       <button class="btn" onclick="printLedgerCard('${a.id}')">Ledger Card</button>
       <button class="btn" onclick="printPropertyCard('${a.id}')">Property Card</button>
@@ -2429,7 +2489,10 @@ function renderRetired() {
             <td class="num mono">${sx ? '<span class="subtle">n/a</span>' : fmtMoney(a.accum_depr_baseline)}</td>
             <td class="truncate" title="${esc(a.retire_detail)}">${esc(a.retire_reason) || "—"}</td>
             <td class="mono">${fmtDate(a.retired_at ? a.retired_at.slice(0, 10) : "")}</td>
-            <td>${canEdit("retired") ? `<button class="btn small danger" onclick="event.stopPropagation();deleteRetiredAsset('${a.id}')">Delete</button>` : ""}</td>
+            <td style="white-space:nowrap;">
+              ${canEdit("register") ? `<button class="btn small ghost" onclick="event.stopPropagation();openReviveModal('${a.id}')">↩ Reactivate</button>` : ""}
+              ${canEdit("retired") ? `<button class="btn small danger" style="margin-left:4px;" onclick="event.stopPropagation();deleteRetiredAsset('${a.id}')">Delete</button>` : ""}
+            </td>
           </tr>`;
         }).join("") : `<tr><td colspan="10"><div class="empty">No retired items.</div></td></tr>`}
         </tbody>
@@ -4239,6 +4302,78 @@ function assetEventTimeline(asset) {
     if (e.kind === "retire") runningAD = currentAccumDepr(asset);
     return { ...e, cost: runningCost, accumDepr: runningAD, adjustedCost: round2(runningCost - runningAD) };
   });
+}
+
+/** A unified, plain-language activity log for the asset-detail modal (Sept 2026 follow-up) — every
+ *  revaluation, transfer, account/fund reclassification, ledger entry (adjustment/impairment/repair),
+ *  and retire/reactivate cycle, each with its own effective date and who did it, newest first. This
+ *  is distinct from assetEventTimeline() above: that one is a cost/quantity roll-forward built
+ *  specifically for the printed Ledger/Property Cards (which don't need account/fund changes or
+ *  reactivation at all); this one is a plain narrative log for on-screen review, so the client can
+ *  see everything that's ever happened to an item — and when — without hunting through several
+ *  separate summary lines. A past retire→reactivate cycle is reconstructed from each reactivations[]
+ *  entry's own previous_retired_at/previous_retire_reason fields (see reviveAsset()), so reactivating
+ *  an item never loses the record of why/when it was retired the first time. */
+function assetActivityHistory(asset) {
+  const events = [];
+  (asset.revaluations || []).forEach(r => {
+    events.push({
+      date: r.date, at: r.at || r.date, by: r.by || "",
+      text: `Revalued: ${fmtMoney(r.old_cost)} → ${fmtMoney(r.new_cost)}` +
+        (r.old_residual !== r.new_residual ? ` (residual ${fmtMoney(r.old_residual)} → ${fmtMoney(r.new_residual)})` : "") +
+        (r.reason ? ` — ${r.reason}` : ""),
+    });
+  });
+  (asset.transfers || []).forEach(t => {
+    const parts = [];
+    if (t.new_location !== t.old_location) parts.push(`location ${t.old_location || "—"} → ${t.new_location || "—"}`);
+    if (t.new_accountable_officer !== t.old_accountable_officer) parts.push(`officer ${t.old_accountable_officer || "—"} → ${t.new_accountable_officer || "—"}`);
+    events.push({
+      date: t.date, at: t.at || t.date, by: t.by || "",
+      text: `Transferred${parts.length ? ": " + parts.join(", ") : ""}` + (t.reason ? ` — ${t.reason}` : ""),
+    });
+  });
+  (asset.account_changes || []).forEach(c => {
+    events.push({
+      date: c.date, at: c.at || c.date, by: c.by || "",
+      text: `Account reclassified: ${c.old_code || "—"} — ${c.old_name || "—"} → ${c.new_code} — ${c.new_name}`,
+    });
+  });
+  (asset.fund_changes || []).forEach(c => {
+    events.push({
+      date: c.date, at: c.at || c.date, by: c.by || "",
+      text: `Fund changed: ${fundLabel(c.old_fund)} → ${fundLabel(c.new_fund)}`,
+    });
+  });
+  (asset.ledger_entries || []).forEach(e => {
+    const label = e.type === "adjustment" ? `Adjustment ${fmtMoney(e.amount)}`
+      : e.type === "impairment" ? `Impairment loss ${fmtMoney(Math.abs(e.amount))}`
+      : `Repair — ${fmtMoney(e.amount)}`;
+    events.push({
+      date: e.date, at: e.at || e.date, by: e.by || "",
+      text: label + (e.note ? `: ${e.note}` : "") + (e.reference && e.type === "repair" ? ` (${e.reference})` : ""),
+    });
+  });
+  (asset.reactivations || []).forEach(rc => {
+    if (rc.previous_retired_at) {
+      events.push({
+        date: rc.previous_retired_at.slice(0, 10), at: rc.previous_retired_at, by: rc.previous_retired_by || "",
+        text: `Retired — ${rc.previous_retire_reason || "—"}` + (rc.previous_retire_detail ? `: ${rc.previous_retire_detail}` : ""),
+      });
+    }
+    events.push({
+      date: rc.date, at: rc.at || rc.date, by: rc.by || "",
+      text: `Reactivated — back to Active` + (rc.reason ? `: ${rc.reason}` : ""),
+    });
+  });
+  if (asset.status === "retired" && asset.retired_at) {
+    events.push({
+      date: asset.retired_at.slice(0, 10), at: asset.retired_at, by: asset.retired_by || "",
+      text: `Retired — ${asset.retire_reason || "—"}` + (asset.retire_detail ? `: ${asset.retire_detail}` : ""),
+    });
+  }
+  events.sort((a, b) => String(b.at).localeCompare(String(a.at)));
+  return events;
 }
 function printCardsHtml(title, cardsHtml) {
   return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>${esc(title)}</title>
@@ -6530,7 +6665,7 @@ export function initApp(user) {
    so anything called from an inline event handler attribute must be attached explicitly.) */
 Object.assign(window, {
   setView, renderAll, openBulkAddModal, openAssetModal, openAssetDetail, closeModal,
-  openRetireModal, submitRetire, saveAsset, submitBulkAdd, postPeriod, undoPosting,
+  openRetireModal, submitRetire, openReviveModal, reviveAsset, saveAsset, submitBulkAdd, postPeriod, undoPosting,
   exportJevCsv, exportReconCsv, saveTbSnapshot,
   openRevalueModal, revalueAsset,
   openTransferModal, transferAsset,
