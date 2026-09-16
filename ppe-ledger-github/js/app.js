@@ -370,6 +370,31 @@ function viewerLabel() {
 function currentEmailLower() {
   return ((S.currentUser && S.currentUser.email) || "").toLowerCase();
 }
+/** ---------- auditLog (interim, client-side — Sept 2026) ----------
+ *  A stopgap trail for the most audit-sensitive asset actions (create/edit, retire, reactivate,
+ *  permanent delete), written directly from the browser ahead of the proposed Cloud Functions
+ *  migration (see the project notes' Cloud Functions proposal) that would eventually move this
+ *  server-side and make it tamper-resistant. Each call appends ONE new document to a new `auditLog`
+ *  collection — the app itself never updates or deletes an auditLog entry once written, so it reads
+ *  append-only even though today's Firestore rules can't yet truly enforce that from the server side.
+ *  Deliberately best-effort/non-blocking: a failure here is logged to the console and swallowed, so a
+ *  hiccup writing the audit entry can never block, delay, or roll back the real write it's describing. */
+async function logAudit(action, targetType, targetId, details) {
+  if (!S.db) return;
+  try {
+    await S.db.collection("auditLog").add({
+      action,               // e.g. "asset_create" | "asset_update" | "asset_retire" | "asset_reactivate" | "asset_delete"
+      target_type: targetType, // e.g. "asset"
+      target_id: targetId,
+      details: details || {},
+      fund: S.currentFund || null,
+      by: viewerLabel(), by_email: currentEmailLower(),
+      at: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error("auditLog write failed (non-fatal, asset write itself is unaffected):", e);
+  }
+}
 function isHardcodedAdmin(email) {
   return HARDCODED_ADMIN_EMAILS.some(e => e.toLowerCase() === (email || "").toLowerCase());
 }
@@ -1408,6 +1433,10 @@ async function saveAsset(existingId) {
       });
     }
     S.linkParIcsId = null;
+    logAudit(existingId ? "asset_update" : "asset_create", "asset", id, {
+      property_id: rec.property_id || rec.sen || "", description: rec.description || "",
+      account_name: rec.account_name || "", cost: rec.cost || 0, item_type: rec.item_type,
+    });
     toast(existingId ? "Item updated." : linkParIcsRecord ? `Item added — ${linkParIcsRecord.number} marked as recorded.` : "Item added.");
     closeModal();
   } catch (e) {
@@ -1449,9 +1478,14 @@ async function submitRetire(id) {
   if (!detail) return toast("Enter a detail explaining what happened.");
   const ref = document.getElementById("sr_ref").value.trim();
   const date = document.getElementById("sr_date").value || new Date().toISOString().slice(0, 10);
+  const a = S.assets.get(id);
   await S.db.collection("assets").doc(id).update({
     status: "retired", retired_at: date + "T00:00:00.000Z", retired_by: viewerLabel(),
     retire_reason: reason, retire_detail: detail, retire_reference: ref,
+  });
+  logAudit("asset_retire", "asset", id, {
+    property_id: (a && (a.property_id || a.sen)) || "", description: (a && a.description) || "",
+    reason, detail, reference: ref,
   });
   toast("Item retired.");
   closeModal();
@@ -1514,6 +1548,10 @@ async function reviveAsset(id) {
       retired_at: null, retired_by: null, retire_reason: null, retire_detail: null, retire_reference: null,
       reactivations: [...(a.reactivations || []), entry],
       updated_by: viewerLabel(), updated_at: new Date().toISOString(),
+    });
+    logAudit("asset_reactivate", "asset", id, {
+      property_id: a.property_id || a.sen || "", description: a.description || "",
+      reason, effective_date: date,
     });
     toast("Item reactivated — back in the active Asset Register.");
     closeModal();
@@ -2520,6 +2558,13 @@ async function deleteRetiredAsset(id) {
     warn = ` This item has ${parts.join(" and ")} pointing to it — those records will stay on file but will show as "item removed" once this is deleted.`;
   }
   if (!confirm(`Permanently delete ${a.property_id || a.sen || "this item"} — ${a.description || ""}? This can't be undone.${warn}`)) return;
+  // Snapshot the key fields into the audit log BEFORE deleting — once the delete succeeds there's no
+  // asset doc left to read them from.
+  await logAudit("asset_delete", "asset", id, {
+    property_id: a.property_id || a.sen || "", description: a.description || "",
+    account_name: a.account_name || "", cost: a.cost || 0, item_type: itemTypeOf(a),
+    linked_hor_count: linkedHor, linked_ptr_itr_count: linkedPtrItr,
+  });
   await S.db.collection("assets").doc(id).delete();
   toast("Item permanently deleted.");
 }
