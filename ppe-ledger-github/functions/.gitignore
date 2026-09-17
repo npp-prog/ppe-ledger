@@ -1,0 +1,12 @@
+# Dependencies — installed via `npm install` inside functions/ before deploy.
+node_modules/
+
+# Local env/config that should never be committed.
+.env
+.env.*
+*.local
+
+# Firebase CLI debug logs.
+firebase-debug.log
+firebase-debug.*.log
+ui-debug.log
