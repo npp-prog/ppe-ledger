@@ -15,10 +15,10 @@
 // ============================================================================
 
 export const firebaseConfig = {
-  apiKey: "REPLACE_WITH_YOUR_API_KEY",
-  authDomain: "REPLACE_WITH_YOUR_PROJECT.firebaseapp.com",
-  projectId: "REPLACE_WITH_YOUR_PROJECT_ID",
-  storageBucket: "REPLACE_WITH_YOUR_PROJECT.appspot.com",
-  messagingSenderId: "REPLACE_WITH_YOUR_SENDER_ID",
-  appId: "REPLACE_WITH_YOUR_APP_ID",
+  apiKey: "AIzaSyD4BCZEqatP8E0f9ugCCiC2aTctgM4HP1c",
+  authDomain: "mgo-candoni-ppe.firebaseapp.com",
+  projectId: "mgo-candoni-ppe",
+  storageBucket: "mgo-candoni-ppe.firebasestorage.app",
+  messagingSenderId: "598440287076",
+  appId: "1:598440287076:web:486233bb295b6cd61a7871"
 };
