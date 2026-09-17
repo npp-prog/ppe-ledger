@@ -1,0 +1,20 @@
+{
+  "name": "ppe-ledger-functions",
+  "description": "Cloud Functions for the PPE Ledger app — asset create/update/retire/reactivate/delete and depreciation posting, with server-side role checks and an audit log, migrating those operations off direct client-side Firestore writes.",
+  "private": true,
+  "engines": {
+    "node": "20"
+  },
+  "main": "index.js",
+  "dependencies": {
+    "firebase-admin": "^12.6.0",
+    "firebase-functions": "^5.1.1"
+  },
+  "scripts": {
+    "lint": "for f in index.js assets.js depreciation.js lib/*.js; do node --check \"$f\" || exit 1; done",
+    "shell": "firebase functions:shell",
+    "start": "npm run shell",
+    "deploy": "firebase deploy --only functions",
+    "logs": "firebase functions:log"
+  }
+}
