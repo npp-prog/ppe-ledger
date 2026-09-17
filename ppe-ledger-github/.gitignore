@@ -1,0 +1,11 @@
+node_modules/
+npm-debug.log*
+
+# Firebase service-account keys — NEVER commit these.
+# (Download one only to run scripts/seed.mjs locally, then delete it.)
+serviceAccountKey*.json
+*-firebase-adminsdk-*.json
+.env
+.env.*
+
+.DS_Store

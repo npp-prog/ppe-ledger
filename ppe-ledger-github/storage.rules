@@ -1,0 +1,28 @@
+rules_version = '2';
+
+// ============================================================
+// PPE Ledger — Firebase Storage security rules
+//
+// Holds asset photos, generated QR labels (rendered client-side, not stored),
+// and scanned documents (e.g. the PAR) attached to an asset. Same policy as
+// firestore.rules: any signed-in user (added by an admin in Firebase Console
+// -> Authentication) may read and write everything; nobody signed out gets
+// anything. A 20 MB per-file cap guards against an accidental huge upload.
+//
+// Deploy with the Firebase CLI:
+//   firebase deploy --only storage
+// or paste this file's contents into
+//   Firebase Console -> Storage -> Rules -> paste -> Publish
+//
+// NOTE: Firebase Storage requires the project to be on the "Blaze"
+// (pay-as-you-go) billing plan — unlike Firestore/Auth, it isn't available
+// on the free "Spark" plan. See README.md for the one-time setup step.
+// ============================================================
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if request.auth != null && request.resource.size < 20 * 1024 * 1024;
+      allow read, delete: if request.auth != null;
+    }
+  }
+}

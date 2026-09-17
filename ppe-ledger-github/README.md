@@ -9,14 +9,25 @@ equipment, transportation, furniture, construction-in-progress, biological
 assets, and intangibles), and gives your team:
 
 - **Asset Register** — one property card per item: cost, 5% residual value,
-  useful life, accountable officer, PAR/DV reference.
+  useful life, accountable officer, PAR/DV reference, how it was acquired
+  (purchased, found at the station, or donated), plus a photo, a QR
+  identification tag, and a scanned document (e.g. the PAR).
+- **Transfer history** — record a change in location and/or accountable
+  officer/custodian for any asset; every transfer is kept on record and
+  shows up on the Property Card and Equipment Ledger Card.
+- **Construction in Progress (CIP)** — a separate section for tracking
+  in-progress construction projects (multiple contractor billings each,
+  by contract and by administration) apart from the finished-asset
+  register, with a printable Construction in Progress Ledger Card and a
+  one-click "Complete → transfer to PPE" action once a project finishes.
 - **Monthly Depreciation** — automatically computes straight-line
   depreciation for every active asset, lets you post a period, and generates
   a ready-to-book **JEV summary** (grouped by expense/accumulated-depreciation
   account pairs) that you can export as CSV or print.
 - **Reconciliation** — paste in your Trial Balance for any period and the
   app flags any PPE account where the register doesn't tie out, down to the
-  peso.
+  peso — including the 3 CIP account codes, which keep reconciling even
+  after CIP moved out of the Asset Register into its own section.
 - **Retired Assets** — a history of derecognized/disposed items, excluded
   from ongoing depreciation.
 
@@ -100,7 +111,37 @@ There's no self-service sign-up screen in this app on purpose — accounts are
 created by whoever administers the Firebase project, so access stays limited
 to your office.
 
-## 4. Register a Web App and get your config
+## 4. Turn on Storage (photos, QR tags, and documents)
+
+Asset photos and attached documents (like a scanned PAR) are stored in
+**Firebase Storage**, a companion service to Firestore for files rather than
+data records. QR tags are generated on the fly in the browser and aren't
+stored anywhere.
+
+> **This is the one step in this whole setup that isn't free.** Firestore
+> and Authentication both run on Firebase's free "Spark" plan, but Storage
+> requires upgrading to the pay-as-you-go **"Blaze"** plan. For an office
+> register's worth of photos and scanned documents, real-world cost is
+> typically a few cents to a few dollars a month (Firebase gives you a free
+> allowance of storage and downloads before any charge kicks in) — but it
+> does require a billing method on file, unlike every other step in this
+> guide. If you'd rather skip this for now, the rest of the app works fine
+> without it — the photo/document/QR fields on an asset just won't have
+> anywhere to upload to until this step is done.
+
+1. In the left sidebar, go to **Build → Storage → Get started**, or (if
+   prompted) **Upgrade project → Blaze (Pay as you go)** first, then come
+   back to Storage.
+2. Pick the same location you chose for Firestore, and click **Done**.
+3. Go to the **Rules** tab and replace the contents with what's in
+   [`storage.rules`](./storage.rules) in this repo — the same "any signed-in
+   user may read/write" policy as Firestore, with a 20 MB per-file cap.
+4. Click **Publish**.
+5. Optional: **Project settings → Usage and billing → Details & settings**
+   lets you set a budget alert (e.g. notify me if this project spends more
+   than $5 in a month) so an unexpectedly large bill can't sneak up on you.
+
+## 5. Register a Web App and get your config
 
 1. Go to **Project settings** (the gear icon, top left) → scroll to
    **Your apps** → click the **</>** (web) icon.
@@ -127,7 +168,7 @@ to your office.
    > (step 2), not from hiding this file. It's fine to commit it, even to a
    > public GitHub repo.
 
-## 5. Seed the baseline data (one-time)
+## 6. Seed the baseline data (one-time)
 
 This repo ships with `data/seed_assets.json` (the full PPE register as of
 the December 2025 baseline) and `data/seed_tb_2025-12.json` (that same
@@ -158,7 +199,34 @@ script loads both into your new Firestore project in one go.
    Balance. Once it's done, **delete the downloaded key file** — you won't
    need it again unless you want to re-seed from scratch.
 
-## 6. Push this repo to GitHub and turn on Pages
+### If Firebase won't let you generate a key
+
+If step 3 above shows **"Key creation is not allowed on this service
+account. Please check if service account key creation is restricted by
+organization policies"** — this happens on Firebase projects created under
+a Google Workspace / Google Cloud organization (e.g. a government or
+company Google account) whose admins have disabled service account key
+downloads as a security policy. It's not something you did wrong, and you
+have two ways around it:
+
+- **Easiest — use the alternate seed script**, which signs in as one of
+  your app's own user accounts (from step 3 in [Turn on
+  Authentication](#3-turn-on-authentication-sign-in)) instead of an admin
+  key:
+
+  ```sh
+  node scripts/seed-client.mjs
+  ```
+  It will ask for the email and password of one of those accounts, then
+  seed the same data the same way. No service account, no organization
+  policy involved.
+
+- **Or** ask whoever administers your Google Workspace / Cloud
+  organization to grant an exception to the `iam.disableServiceAccountKeyCreation`
+  organization policy for this project (Google Cloud Console → IAM & Admin
+  → Organization Policies), then retry step 3 above.
+
+## 7. Push this repo to GitHub and turn on Pages
 
 1. Create a new repository on GitHub (public or private — either works with
    GitHub Pages, though private repos need GitHub Pages to be available on
@@ -181,7 +249,7 @@ script loads both into your new Firestore project in one go.
    will show your live URL (something like
    `https://<your-org>.github.io/<your-repo>/`).
 
-## 7. Sign in and go
+## 8. Sign in and go
 
 Open the published URL, sign in with one of the accounts you created in step
 3, and you're in. Everyone on the team who has an account shares the same
@@ -218,4 +286,7 @@ minute or two.
 Firestore and Firebase Authentication both have a generous free tier (the
 "Spark" plan) — for an office team of a few dozen people doing normal daily
 use, this app should stay within it indefinitely. GitHub Pages hosting is
-free for public repositories.
+free for public repositories. **Storage** (step 4, for photos/documents) is
+the one exception — it requires the "Blaze" pay-as-you-go plan, though
+typical usage for an office asset register runs a few cents to a few
+dollars a month; see step 4 for a budget-alert option.

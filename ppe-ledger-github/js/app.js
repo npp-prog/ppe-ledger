@@ -4192,7 +4192,9 @@ async function runGrandfatherMigration() {
     toast(`Done — ${result.grandfathered} newly approved, ${result.alreadyApproved} already were, ${result.skippedPending} left pending for you to decide.`);
   } catch (e) {
     console.error(e);
-    toast("Couldn't run the migration — make sure the Cloud Functions are deployed, then try again.");
+    // e.message here is whatever the Cloud Function's HttpsError carried (see functions/grandfather.js) —
+    // showing it directly turns "something broke" into an actionable message without needing DevTools.
+    toast(e && e.message ? `Couldn't run the migration — ${e.message}` : "Couldn't run the migration — make sure the Cloud Functions are deployed, then try again.");
   }
 }
 function openUserRoleModal(existingId) {
