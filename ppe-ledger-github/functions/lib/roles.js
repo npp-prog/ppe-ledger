@@ -59,13 +59,15 @@ function isActive(role) {
 }
 
 /** Returns "edit" | "view" | "none" for `tabKey`, given the caller's email
- *  and already-fetched role doc. Verbatim port of js/app.js's tabAccess(). */
+ *  and already-fetched role doc. Verbatim port of js/app.js's tabAccess() —
+ *  default-deny-edit as of Sept 2026: no role doc, or a role doc that omits
+ *  this tab key, now means "view", not "edit". Keep in sync with app.js. */
 function tabAccess(email, role, tabKey) {
   if (isAdmin(email, role)) return "edit";
-  if (!role) return "edit";
+  if (!role) return "view";
   const level = role.tabs && role.tabs[tabKey];
   if (level === "none" || level === "view" || level === "edit") return level;
-  return VIEW_ONLY_TABS.includes(tabKey) ? "view" : "edit";
+  return "view";
 }
 function hasTabAccess(email, role, tabKey) { return tabAccess(email, role, tabKey) !== "none"; }
 function canEdit(email, role, tabKey) { return tabAccess(email, role, tabKey) === "edit"; }

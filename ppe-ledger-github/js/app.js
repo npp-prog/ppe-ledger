@@ -339,8 +339,8 @@ const S = {
                            // Register item (asset_id); saving one also appends a {type:"repair"}
                            // entry to that asset's own ledger_entries[] — see the HOR section below.
   userRoles: new Map(),   // lowercased email -> role doc (own collection "user_roles") — see the
-                           // Access Role section below. Absence of a doc for an email means "full
-                           // access, opt-in restriction model" — see tabAccess().
+                           // Access Role section below. Absence of a doc for an email means "view
+                           // only everywhere, default-deny-edit model" (Sept 2026) — see tabAccess().
   linkParIcsId: null,     // set by recordParIcsAsNew() right before opening the Add Item modal — tells
                            // saveAsset() which pending PAR/ICS record to mark "recorded" once the
                            // new asset is created. Reset to null at the top of every openAssetModal()
@@ -410,18 +410,22 @@ function isAdmin() {
 }
 /** Returns "edit" | "view" | "none" for `tabKey`, for the CURRENT signed-in user.
  *  - Admins always get "edit" on every ordinary tab (Users & Roles access is separate — isAdmin()).
- *  - Everyone else defaults to full "edit" access UNLESS a user_roles doc exists for their email —
- *    this is an opt-in restriction model, so shipping this feature never silently locks out staff
- *    who haven't been given an explicit role yet.
- *  - A role doc that simply omits a given tab key also defaults that tab to full access, so a tab
- *    added in the future is never accidentally locked down for someone whose role doc pre-dates it. */
+ *  - Everyone else defaults to "view" access UNLESS a role/tab entry explicitly grants "edit" — a
+ *    default-deny-edit model (changed from default-allow-edit, Sept 2026): being signed in, or being
+ *    given access at all, no longer implies being able to change anything. An Admin still has to
+ *    explicitly flip a tab to Edit (via "+ Add user" / "Approve with custom access…") for someone to
+ *    write there; a plain "Approve" on a pending sign-in, or an account with no role doc at all,
+ *    now lands the person in read-only View everywhere until an Admin deliberately grants more.
+ *  - A role doc that simply omits a given tab key also defaults that tab to "view", for the same
+ *    reason — a tab added in the future starts view-only for existing roles rather than silently
+ *    inheriting full edit. */
 function tabAccess(tabKey) {
   if (isAdmin()) return "edit";
   const role = S.userRoles.get(currentEmailLower());
-  if (!role) return "edit";
+  if (!role) return "view";
   const level = role.tabs && role.tabs[tabKey];
   if (level === "none" || level === "view" || level === "edit") return level;
-  return VIEW_ONLY_TABS.includes(tabKey) ? "view" : "edit";
+  return "view";
 }
 function hasTabAccess(tabKey) { return tabAccess(tabKey) !== "none"; }
 function canEdit(tabKey) { return tabAccess(tabKey) === "edit"; }
@@ -4082,15 +4086,15 @@ function printHor(id) {
 const PERMISSION_TAB_ORDER = ["dashboard", "reports", "register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "hor", "retired"];
 function permissionTabLabel(tabKey) { return (VIEW_TITLES[tabKey] || [tabKey])[0]; }
 /** Short, decision-relevant summary of one role doc's effective access for the Users & Roles list
- *  — spelling out all ten tabs for every row would be noisy, so this calls out only what's NOT
- *  full access (mirrors the same "absent key = full access" default used by tabAccess()). */
+ *  — spelling out all ten tabs for every row would be noisy, so this calls out only what's NOT the
+ *  "view" baseline (mirrors the same "absent key = view" default used by tabAccess(), Sept 2026). */
 function summarizeRoleAccess(role) {
   if (role.is_admin) return "Full Admin";
-  const restricted = PERMISSION_TAB_ORDER
-    .map(t => ({ t, level: (role.tabs && role.tabs[t]) || (VIEW_ONLY_TABS.includes(t) ? "view" : "edit") }))
-    .filter(x => !(VIEW_ONLY_TABS.includes(x.t) ? x.level === "view" : x.level === "edit"));
-  if (!restricted.length) return "Full access (no restrictions set)";
-  return restricted.map(x => `${permissionTabLabel(x.t)}: ${x.level === "none" ? "Hidden" : "View only"}`).join(", ");
+  const notable = PERMISSION_TAB_ORDER
+    .map(t => ({ t, level: (role.tabs && role.tabs[t]) || "view" }))
+    .filter(x => x.level !== "view");
+  if (!notable.length) return "View only everywhere (no Edit access granted)";
+  return notable.map(x => `${permissionTabLabel(x.t)}: ${x.level === "none" ? "Hidden" : "Edit access"}`).join(", ");
 }
 /** True for a self-registered, not-yet-decided Google sign-in request (see checkOrRegisterApproval())
  *  — distinct from an ordinary role doc that simply predates the `approved` field (those are treated
@@ -4152,16 +4156,17 @@ function renderUsers() {
               <button class="btn small danger" onclick="deleteUserRole('${esc(r.id)}')">Delete</button>
             </td>
           </tr>`).join("")}
-        ${rows.length ? "" : `<tr><td colspan="4"><div class="empty">No custom roles yet — every email/password user currently has full access to every tab. A "Continue with Google" sign-in now requires approval above once someone requests it.</div></td></tr>`}
+        ${rows.length ? "" : `<tr><td colspan="4"><div class="empty">No custom roles yet — every email/password user currently defaults to view-only access on every tab until an Admin grants Edit here. A "Continue with Google" sign-in now requires approval above once someone requests it.</div></td></tr>`}
       </tbody>
     </table></div>
   `;
 }
-/** Quick-approve a pending Google sign-in request with default full access (same "no restrictions
- *  set" default every other role gets) — the one-click path for the common case. An Admin who wants
- *  to hand them restricted tab access instead can use "Approve with custom access…", which opens
- *  the same modal as editing any other user (saveUserRole() always sets approved:true, so saving
- *  from that modal approves them too). */
+/** Quick-approve a pending Google sign-in request with default view-only access (same "no Edit
+ *  granted yet" default every other role gets, Sept 2026) — the one-click path for the common case:
+ *  they can sign in and look around, but can't change anything until an Admin deliberately grants
+ *  Edit on specific tabs. An Admin who wants to hand them Edit access right away can use "Approve
+ *  with custom access…" instead, which opens the same modal as editing any other user (saveUserRole()
+ *  always sets approved:true, so saving from that modal approves them too). */
 async function approveUserRole(id) {
   if (!isAdmin()) return toast("Admins only.");
   if (!S.userRoles.has(id)) return;
@@ -4203,7 +4208,11 @@ function openUserRoleModal(existingId) {
   const tabs = (r && r.tabs) || {};
   const optionsFor = (tabKey, selected) => {
     const levels = VIEW_ONLY_TABS.includes(tabKey) ? ["view", "none"] : ["edit", "view", "none"];
-    const cur = selected || (VIEW_ONLY_TABS.includes(tabKey) ? "view" : "edit");
+    // Default preselection is "view" for every tab (Sept 2026 default-deny-edit change) — an Admin
+    // has to deliberately pick "Edit" here for someone to get write access to that tab. Since
+    // saveUserRole() below writes whatever's selected for every tab, this preselection IS what a
+    // brand-new user or a not-yet-configured tab actually gets saved as.
+    const cur = selected || "view";
     return levels.map(lv => `<option value="${lv}" ${lv === cur ? "selected" : ""}>${lv === "edit" ? "Edit" : lv === "view" ? "View only" : "Hidden"}</option>`).join("");
   };
   openModal(`
@@ -4259,18 +4268,19 @@ async function saveUserRole(existingId) {
 async function deleteUserRole(id) {
   if (!isAdmin()) return toast("Admins only.");
   // Deleting a role doc means different things depending on how this person signs in: an
-  // email/password account reverts to full access (isPasswordSignIn() bypasses the approval gate
-  // regardless of a doc existing), but a Google-signed-in user's approval lives IN this doc — so
-  // deleting it locks them out again rather than opening things up. sign_in_method is set when the
-  // doc is first self-registered (see checkOrRegisterApproval()) and preserved through later edits.
+  // email/password account reverts to the default (isPasswordSignIn() bypasses the approval gate
+  // regardless of a doc existing) — which since Sept 2026 is view-only everywhere, not full access —
+  // but a Google-signed-in user's approval lives IN this doc — so deleting it locks them out again
+  // rather than opening things up. sign_in_method is set when the doc is first self-registered (see
+  // checkOrRegisterApproval()) and preserved through later edits.
   const r = S.userRoles.get(id);
   const isGoogleUser = r && r.sign_in_method === "google";
   const msg = isGoogleUser
     ? "Delete this user's role? Since they signed in with Google, this removes their approval — they'll be locked out again until a new request is approved."
-    : "Delete this user's role? They will revert to FULL access to every tab (restrictions here are opt-in) until a new role is set.";
+    : "Delete this user's role? They will revert to view-only access on every tab until a new role grants Edit again.";
   if (!confirm(msg)) return;
   await S.db.collection("user_roles").doc(id).delete();
-  toast(isGoogleUser ? "Role deleted — that user is locked out until approved again." : "Role deleted — that user now has full access again.");
+  toast(isGoogleUser ? "Role deleted — that user is locked out until approved again." : "Role deleted — that user now has view-only access again.");
   closeModal();
 }
 
