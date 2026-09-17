@@ -3,7 +3,7 @@
    Municipal Government Office, Candoni — General Fund PPE
    (Standalone / Firebase edition — ported from the Claude Artifact version)
    ============================================================ */
-import { db, browserDownload, uploadFile, deleteFile, changePassword } from "./firebase.js";
+import { db, browserDownload, uploadFile, deleteFile, changePassword, signOutUser, callFunction } from "./firebase.js";
 
 /* ---------- Chart-of-accounts catalog (fixed reference data — not user data) ---------- */
 const ACCOUNT_CATALOG = [
@@ -4092,15 +4092,44 @@ function summarizeRoleAccess(role) {
   if (!restricted.length) return "Full access (no restrictions set)";
   return restricted.map(x => `${permissionTabLabel(x.t)}: ${x.level === "none" ? "Hidden" : "View only"}`).join(", ");
 }
+/** True for a self-registered, not-yet-decided Google sign-in request (see checkOrRegisterApproval())
+ *  — distinct from an ordinary role doc that simply predates the `approved` field (those are treated
+ *  as already-settled, not pending, so old roles don't suddenly show up in the request queue). */
+function isPendingRequest(r) { return r.pending === true && r.approved !== true; }
 function renderUsers() {
   const el = document.getElementById("view-users");
   if (!el) return;
   if (!isAdmin()) { el.innerHTML = `<div class="empty">Restricted to Admins.</div>`; return; }
-  const rows = [...S.userRoles.values()]
-    .filter(r => !isHardcodedAdmin(r.email || r.id))
-    .sort((a, b) => (a.email || a.id).localeCompare(b.email || b.id));
+  const all = [...S.userRoles.values()].filter(r => !isHardcodedAdmin(r.email || r.id));
+  const pending = all.filter(isPendingRequest).sort((a, b) => (a.requested_at || "").localeCompare(b.requested_at || ""));
+  const rows = all.filter(r => !isPendingRequest(r)).sort((a, b) => (a.email || a.id).localeCompare(b.email || b.id));
   el.innerHTML = `
     <div class="banner warn">Access here is <b>app-level only</b> — it hides menus and buttons in this app, but the shared database underneath is not locked per role. It keeps everyday staff to the menus they need; it is not a defense against someone deliberately bypassing the app itself (e.g. browser dev tools).</div>
+    <div class="banner" style="margin-top:8px;">
+      <b>One-time setup:</b> before publishing the updated Firestore rules that require Google
+      sign-ins to be approved, run this once so nobody already using the app today gets locked out —
+      it marks everyone currently registered as approved automatically. Safe to run more than once.
+      <button class="btn small ghost" style="margin-left:8px;" onclick="runGrandfatherMigration()">Run one-time approval migration</button>
+    </div>
+    ${pending.length ? `
+    <div class="panel" style="margin-bottom:14px;">
+      <div class="panel-head"><div><h3>Pending sign-in requests</h3><div class="desc">${pending.length} Google account(s) signed in but not yet approved — they see a "waiting for approval" screen and have no access until you decide below</div></div></div>
+      <div class="panel-body flush"><div class="tablewrap"><table>
+        <thead><tr><th>Email</th><th>Name</th><th>Requested</th><th></th></tr></thead>
+        <tbody>${pending.map(r => `
+          <tr>
+            <td class="mono">${esc(r.email || r.id)}</td>
+            <td>${esc(r.display_name) || "—"}</td>
+            <td class="mono">${fmtDate((r.requested_at || "").slice(0, 10))}</td>
+            <td style="white-space:nowrap;">
+              <button class="btn small primary" onclick="approveUserRole('${esc(r.id)}')">Approve</button>
+              <button class="btn small ghost" style="margin-left:4px;" onclick="openUserRoleModal('${esc(r.id)}')">Approve with custom access…</button>
+              <button class="btn small danger" style="margin-left:4px;" onclick="denyPendingUser('${esc(r.id)}')">Deny</button>
+            </td>
+          </tr>`).join("")}
+        </tbody>
+      </table></div></div>
+    </div>` : ""}
     <div class="toolbar">
       <button class="btn primary" onclick="openUserRoleModal()">+ Add user</button>
     </div>
@@ -4123,10 +4152,48 @@ function renderUsers() {
               <button class="btn small danger" onclick="deleteUserRole('${esc(r.id)}')">Delete</button>
             </td>
           </tr>`).join("")}
-        ${rows.length ? "" : `<tr><td colspan="4"><div class="empty">No custom roles yet — every other signed-in user currently has full access to every tab.</div></td></tr>`}
+        ${rows.length ? "" : `<tr><td colspan="4"><div class="empty">No custom roles yet — every email/password user currently has full access to every tab. A "Continue with Google" sign-in now requires approval above once someone requests it.</div></td></tr>`}
       </tbody>
     </table></div>
   `;
+}
+/** Quick-approve a pending Google sign-in request with default full access (same "no restrictions
+ *  set" default every other role gets) — the one-click path for the common case. An Admin who wants
+ *  to hand them restricted tab access instead can use "Approve with custom access…", which opens
+ *  the same modal as editing any other user (saveUserRole() always sets approved:true, so saving
+ *  from that modal approves them too). */
+async function approveUserRole(id) {
+  if (!isAdmin()) return toast("Admins only.");
+  if (!S.userRoles.has(id)) return;
+  try {
+    await S.db.collection("user_roles").doc(id).update({
+      approved: true, approved_by: viewerLabel(), approved_at: new Date().toISOString(),
+    });
+    toast("Approved — they can sign in now.");
+  } catch (e) { console.error(e); toast("Couldn't approve — try again."); }
+}
+async function denyPendingUser(id) {
+  if (!isAdmin()) return toast("Admins only.");
+  if (!confirm("Deny this access request? They'll stay locked out — signing in again just creates a new pending request.")) return;
+  try {
+    await S.db.collection("user_roles").doc(id).delete();
+    toast("Request denied.");
+  } catch (e) { console.error(e); toast("Couldn't save — try again."); }
+}
+/** Runs the one-time (but safely re-runnable) grandfather migration — see
+ *  functions/grandfather.js — via its callable Cloud Function. Must be run before publishing the
+ *  updated firestore.rules that require Google sign-ins to be approved (see the big comment atop
+ *  that file), so everyone already using the app today keeps working without interruption. */
+async function runGrandfatherMigration() {
+  if (!isAdmin()) return toast("Admins only.");
+  if (!confirm("Mark everyone currently registered as approved? This is safe to run more than once — it never touches anyone already approved or a request still awaiting your decision.")) return;
+  try {
+    const result = await callFunction("grandfatherExistingUsers");
+    toast(`Done — ${result.grandfathered} newly approved, ${result.alreadyApproved} already were, ${result.skippedPending} left pending for you to decide.`);
+  } catch (e) {
+    console.error(e);
+    toast("Couldn't run the migration — make sure the Cloud Functions are deployed, then try again.");
+  }
 }
 function openUserRoleModal(existingId) {
   if (!isAdmin()) return toast("Admins only.");
@@ -4174,7 +4241,10 @@ async function saveUserRole(existingId) {
   PERMISSION_TAB_ORDER.forEach(t => { tabsOut[t] = document.getElementById(`ur_tab_${t}`).value; });
   const existing = existingId ? S.userRoles.get(existingId) : null;
   const payload = {
-    email: emailKey, is_admin: isAdminChecked, tabs: tabsOut,
+    // approved:true unconditionally — an Admin creating or editing a role doc through this modal
+    // IS the approval, whether that's a brand-new email/password account or finalizing a pending
+    // Google sign-in request via "Approve with custom access…" (see openUserRoleModal()).
+    email: emailKey, is_admin: isAdminChecked, tabs: tabsOut, approved: true,
     updated_by: viewerLabel(), updated_at: new Date().toISOString(),
   };
   if (!existing) { payload.created_by = viewerLabel(); payload.created_at = new Date().toISOString(); }
@@ -4186,9 +4256,19 @@ async function saveUserRole(existingId) {
 }
 async function deleteUserRole(id) {
   if (!isAdmin()) return toast("Admins only.");
-  if (!confirm("Delete this user's role? They will revert to FULL access to every tab (restrictions here are opt-in) until a new role is set.")) return;
+  // Deleting a role doc means different things depending on how this person signs in: an
+  // email/password account reverts to full access (isPasswordSignIn() bypasses the approval gate
+  // regardless of a doc existing), but a Google-signed-in user's approval lives IN this doc — so
+  // deleting it locks them out again rather than opening things up. sign_in_method is set when the
+  // doc is first self-registered (see checkOrRegisterApproval()) and preserved through later edits.
+  const r = S.userRoles.get(id);
+  const isGoogleUser = r && r.sign_in_method === "google";
+  const msg = isGoogleUser
+    ? "Delete this user's role? Since they signed in with Google, this removes their approval — they'll be locked out again until a new request is approved."
+    : "Delete this user's role? They will revert to FULL access to every tab (restrictions here are opt-in) until a new role is set.";
+  if (!confirm(msg)) return;
   await S.db.collection("user_roles").doc(id).delete();
-  toast("Role deleted — that user now has full access again.");
+  toast(isGoogleUser ? "Role deleted — that user is locked out until approved again." : "Role deleted — that user now has full access again.");
   closeModal();
 }
 
@@ -6682,13 +6762,82 @@ function bindStaticUI() {
   if (changePwBtn) changePwBtn.addEventListener("click", openChangePasswordModal);
 }
 
+/** ---------- Google Sign-In pending-approval gate (Sept 2026 follow-up) ----------
+ *  Closes the gap that let prioloneil@gmail.com sign in with full access despite never being added
+ *  anywhere: a Google-signed-in user now needs an explicit user_roles/{email} doc with
+ *  approved:true before initApp() renders the real app — enforced here for a friendly "waiting for
+ *  approval" screen, and independently enforced server-side by firestore.rules' isApproved() so
+ *  this can't be bypassed by editing the page's JavaScript. Email/password accounts are unaffected
+ *  (see isPasswordSignIn() in firestore.rules for why) — this check only ever runs for the
+ *  "google.com" provider (see initApp()).
+ *
+ *  Returns true if `user` is approved to use the app. A brand-new Google sign-in with no existing
+ *  user_roles doc self-registers a pending request (approved:false, pending:true) as a side effect,
+ *  so it shows up in the Users & Roles tab's "Pending sign-in requests" list without an Admin
+ *  having to do anything else first. */
+async function checkOrRegisterApproval(user) {
+  const email = (user.email || "").toLowerCase();
+  let snap;
+  try { snap = await db.collection("user_roles").doc(email).get(); }
+  catch (e) { console.error("Couldn't check approval status:", e); return false; }
+  if (snap.exists) return snap.data().approved === true;
+  try {
+    await db.collection("user_roles").doc(email).set({
+      email, approved: false, pending: true,
+      display_name: user.displayName || "",
+      sign_in_method: "google",
+      requested_at: new Date().toISOString(),
+    });
+  } catch (e) { console.error("Couldn't register a pending access request:", e); }
+  return false;
+}
+/** Replaces the entire #app root with a blocking "waiting for approval" screen — no tab, no data,
+ *  nothing from the real app is ever rendered underneath it. Also watches the person's own
+ *  user_roles doc live, so the moment an Admin approves them the page picks it up automatically
+ *  (a full reload, to re-run initApp() cleanly from scratch, rather than trying to splice the
+ *  real app into a DOM this function just tore down). */
+function renderPendingApprovalScreen(email) {
+  const appRoot = document.getElementById("app");
+  if (!appRoot) return;
+  appRoot.innerHTML = `
+    <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div class="panel" style="max-width:440px;">
+        <div class="panel-body" style="text-align:center;">
+          <h3 style="margin-top:0;">Waiting for approval</h3>
+          <p class="subtle">Signed in as <b>${esc(email)}</b>.</p>
+          <p>Your access request has been sent to your Admin. You'll be able to use the system as soon as it's approved — this page will update on its own, no need to keep checking back.</p>
+          <button class="btn ghost" id="pendingSignOutBtn" style="margin-top:6px;">Sign out</button>
+        </div>
+      </div>
+    </div>
+  `;
+  const btn = document.getElementById("pendingSignOutBtn");
+  if (btn) btn.addEventListener("click", async () => { try { await signOutUser(); } catch (e) { console.error(e); } });
+  try {
+    db.collection("user_roles").doc(email).onSnapshot(
+      snap => { if (snap.exists && snap.data().approved === true) location.reload(); },
+      () => { /* non-fatal — worst case they just refresh manually once approved */ }
+    );
+  } catch (e) { /* same — non-fatal */ }
+}
+
 /* ---------- entry point, called by js/main.js once Firebase Auth confirms a signed-in user ---------- */
-export function initApp(user) {
+export async function initApp(user) {
   S.currentUser = user;
   try {
     const saved = localStorage.getItem("ppeFund");
     if (saved && FUNDS.some(f => f.code === saved)) S.currentFund = saved;
   } catch (e) { /* private browsing, etc. — fine to skip, defaults to GF */ }
+
+  // Pending-approval gate — checked before touching any of the normal app chrome below, so a
+  // not-yet-approved Google sign-in never sees so much as a flash of it. See the big comment above
+  // checkOrRegisterApproval() for the full story.
+  const providerId = user.providerData && user.providerData[0] && user.providerData[0].providerId;
+  if (providerId === "google.com" && !isHardcodedAdmin(currentEmailLower())) {
+    const approved = await checkOrRegisterApproval(user);
+    if (!approved) { renderPendingApprovalScreen(currentEmailLower()); return; }
+  }
+
   document.querySelectorAll("#fundSwitch button").forEach(b => b.classList.toggle("active", b.dataset.fund === S.currentFund));
   const emailEl = document.getElementById("authEmail");
   if (emailEl) emailEl.textContent = viewerLabel();
@@ -6696,7 +6845,6 @@ export function initApp(user) {
   // no password on this account to change (their password, if any, lives with Google).
   const changePwBtn = document.getElementById("changePasswordBtn");
   if (changePwBtn) {
-    const providerId = user.providerData && user.providerData[0] && user.providerData[0].providerId;
     changePwBtn.hidden = providerId !== "password";
   }
   bindStaticUI();
@@ -6733,6 +6881,6 @@ Object.assign(window, {
   printPtr, printItr, exportPtrItrCsv, openEditPtrItrModal, savePtrItrEdit,
   openSwaModal, saveSwa, deleteSwa, unmatchSwa, exportSwaCsv, openMatchSwaModal, pickSwaForBilling, unmatchDraftSwa,
   openHorModal, saveHorRecord, deleteHorRecord, printHor, addHorSparepartLine,
-  openUserRoleModal, saveUserRole, deleteUserRole,
+  openUserRoleModal, saveUserRole, deleteUserRole, approveUserRole, denyPendingUser, runGrandfatherMigration,
   openChangePasswordModal, submitChangePassword,
 });

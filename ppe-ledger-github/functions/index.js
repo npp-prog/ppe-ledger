@@ -12,6 +12,7 @@ admin.initializeApp();
 
 const assets = require('./assets');
 const depreciation = require('./depreciation');
+const grandfather = require('./grandfather');
 
 exports.createAsset = assets.createAsset;
 exports.updateAsset = assets.updateAsset;
@@ -20,3 +21,7 @@ exports.reactivateAsset = assets.reactivateAsset;
 exports.deleteRetiredAsset = assets.deleteRetiredAsset;
 
 exports.postDepreciationPeriod = depreciation.postDepreciationPeriod;
+
+// One-time (safely re-runnable) migration for the Google Sign-In pending-approval gate — see
+// the comment atop functions/grandfather.js and atop firestore.rules for the full story.
+exports.grandfatherExistingUsers = grandfather.grandfatherExistingUsers;

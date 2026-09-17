@@ -22,6 +22,9 @@ import {
 import {
   getStorage, ref as sRef, uploadBytes, getDownloadURL, deleteObject,
 } from "https://www.gstatic.com/firebasejs/10.13.2/firebase-storage.js";
+import {
+  getFunctions, httpsCallable,
+} from "https://www.gstatic.com/firebasejs/10.13.2/firebase-functions.js";
 
 import { firebaseConfig } from "./firebase-config.js";
 
@@ -29,6 +32,21 @@ const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 const firestore = getFirestore(app);
 const storage = getStorage(app);
+const functions = getFunctions(app);
+
+// ---- Cloud Functions callable wrapper ----
+// Thin passthrough to whichever callable function is named — see functions/index.js in the repo
+// root for what's actually deployed there (createAsset, updateAsset, retireAsset, reactivateAsset,
+// deleteRetiredAsset, postDepreciationPeriod, grandfatherExistingUsers as of Sept 2026). Nothing in
+// the app calls these yet except the one-time grandfather migration button in the Users & Roles
+// tab — the asset/depreciation functions are deployed and available, but js/app.js still writes to
+// Firestore directly for those (see CLOUD_FUNCTIONS_PROPOSAL.md's rollout plan for switching them
+// over later, one at a time).
+export async function callFunction(name, data) {
+  const fn = httpsCallable(functions, name);
+  const result = await fn(data || {});
+  return result.data;
+}
 
 // ---- Auth helpers ----
 export function watchAuthState(callback) {

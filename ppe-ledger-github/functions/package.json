@@ -11,7 +11,7 @@
     "firebase-functions": "^5.1.1"
   },
   "scripts": {
-    "lint": "for f in index.js assets.js depreciation.js lib/*.js; do node --check \"$f\" || exit 1; done",
+    "lint": "for f in index.js assets.js depreciation.js grandfather.js lib/*.js; do node --check \"$f\" || exit 1; done",
     "shell": "firebase functions:shell",
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",

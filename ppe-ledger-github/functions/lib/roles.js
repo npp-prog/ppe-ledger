@@ -91,8 +91,24 @@ async function requireEditAccess(db, auth, tabKey, HttpsError) {
   return { email, role };
 }
 
+/** Callable-function guard for Admin-only actions that aren't about a specific tab (e.g. the
+ *  grandfather migration) — throws unless the caller is an Admin (hardcoded, or is_admin:true on
+ *  their own role doc). Unlike requireEditAccess(), does not check isActive()/tabAccess() since
+ *  there's no tab involved; an Admin is an Admin regardless of per-tab settings. */
+async function requireAdmin(db, auth, HttpsError) {
+  if (!auth || !auth.token || !auth.token.email) {
+    throw new HttpsError("unauthenticated", "You must be signed in to do this.");
+  }
+  const email = (auth.token.email || "").toLowerCase();
+  const { role } = await loadRoleForEmail(db, email);
+  if (!isAdmin(email, role)) {
+    throw new HttpsError("permission-denied", "Admins only.");
+  }
+  return { email, role };
+}
+
 module.exports = {
   HARDCODED_ADMIN_EMAILS, EDITABLE_TABS, VIEW_ONLY_TABS, ALL_PERMISSION_TABS,
   isHardcodedAdmin, loadRoleForEmail, isAdmin, isActive, tabAccess, hasTabAccess, canEdit,
-  requireEditAccess,
+  requireEditAccess, requireAdmin,
 };

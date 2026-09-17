@@ -31,13 +31,11 @@ rules_version = '2';
 //      wrong in an existing document; it can only stop a NEW bad value
 //      from being introduced.
 //   4. Everything else (postings, tb_snapshots, cip_projects, par_ics,
-//      ptr_itr, swa_records, history_of_repair) keeps today's exact
-//      behavior — any signed-in+active user can read/write — since
+//      ptr_itr, swa_records, user_roles, history_of_repair) keeps today's
+//      exact behavior — any signed-in+active user can read/write — since
 //      per-tab/per-collection write restrictions were deliberately deferred
 //      to a future Cloud Functions migration (see the separate Cloud
 //      Functions proposal doc) rather than rebuilt into these rules now.
-//      user_roles is the one exception — see the Sept 2026 follow-up below,
-//      which tightens its write access as part of the pending-approval gate.
 //
 // IMPORTANT — required-field validation on `assets` is scoped to CREATE
 // only, not update. Many of the original 245 General Fund assets predate
@@ -58,45 +56,7 @@ rules_version = '2';
 // Console (Firestore Database -> Rules tab shows the live version) — this
 // file was drafted without being able to fetch that live version directly,
 // so don't assume it matches what's actually deployed today.
-//
-// ---------------------------------------------------------------------------
-// Sept 2026 follow-up — Google Sign-In pending-approval gate.
-//
-// Previously, ANY Google account could sign in and — since a fresh Google
-// sign-in has no user_roles doc — got full "edit everything" access by
-// default (the same opt-in model that let full access, not "no access,"
-// be everyone's default). That's how prioloneil@gmail.com ended up with
-// full Dashboard access despite never being added anywhere.
-//
-// This version closes that gap for Google Sign-In specifically, while
-// leaving email/password accounts exactly as they were:
-//   - isApproved() now requires a Google-signed-in user to have an explicit
-//     user_roles/{email} doc with approved:true, written either by an Admin
-//     (via the Users & Roles tab) or by the one-time grandfather migration
-//     that ran when this shipped (covering everyone already using the app).
-//   - Email/password sign-ins are exempt (isPasswordSignIn()) — those
-//     accounts are only ever created one at a time by an Admin, so creating
-//     the account already IS the approval.
-//   - The hardcoded Admin email is always exempt (isHardcodedAdmin()).
-//   - user_roles' own rules are tightened at the same time: write access
-//     used to be open to any signed-in+active user (so, in principle, any
-//     staff member could have edited anyone's role, including granting
-//     themselves Admin) — now only an existing Admin can approve/edit/
-//     delete a role doc, while a brand-new Google sign-in may still create
-//     ONLY their own doc, and only as a non-admin, non-approved pending
-//     request (see the user_roles match block below for the exact rule).
-//
-// IMPORTANT — sequencing: do NOT publish this file until the one-time
-// grandfather migration (functions/grandfather.js, callable as
-// `grandfatherExistingUsers`) has been run successfully at least once.
-// That migration marks every email currently in Firebase Authentication as
-// approved:true (merged onto whatever role doc, if any, already exists for
-// them) so nobody using the app today gets locked out the moment this
-// publishes. Publishing this file BEFORE running that migration would
-// immediately deny Firestore access to every Google-signed-in user who
-// doesn't already have an approved:true doc — including staff actively
-// using the app right now.
-// ---------------------------------------------------------------------------
+// ============================================================
 service cloud.firestore {
   match /databases/{database}/documents {
 
@@ -104,40 +64,13 @@ service cloud.firestore {
     function isSignedIn() {
       return request.auth != null;
     }
-    // Mirrors HARDCODED_ADMIN_EMAILS in js/app.js — keep in sync if that ever changes.
-    function isHardcodedAdmin() {
-      return isSignedIn() && request.auth.token.email.lower() == "npp@mgocandoniaccounting.org";
-    }
-    // Email/password accounts are only ever created one at a time by an Admin (no self-registration
-    // form exists — see js/auth-ui.js), so creating the account already IS the approval. Only
-    // "Continue with Google" is open to any Google account with no allowlist, which is why that path
-    // alone needs the pending-approval gate below.
-    function isPasswordSignIn() {
-      return isSignedIn() && request.auth.token.firebase.sign_in_provider == "password";
-    }
     function isActive() {
       let email = request.auth.token.email.lower();
       return !exists(/databases/$(database)/documents/user_roles/$(email))
         || get(/databases/$(database)/documents/user_roles/$(email)).data.get('active', true) == true;
     }
-    // A Google-signed-in user needs an explicit approved:true user_roles doc; password sign-ins and
-    // the hardcoded admin are exempt. See the big comment above this service block for the full story.
-    function isApproved() {
-      let email = request.auth.token.email.lower();
-      return isHardcodedAdmin() || isPasswordSignIn()
-        || (exists(/databases/$(database)/documents/user_roles/$(email))
-            && get(/databases/$(database)/documents/user_roles/$(email)).data.get('approved', false) == true);
-    }
     function isSignedInActive() {
-      return isSignedIn() && isApproved() && isActive();
-    }
-    // True for the hardcoded admin, or anyone whose OWN role doc has is_admin:true — used to gate
-    // who can approve pending requests / edit or delete other users' role docs.
-    function isRoleAdmin() {
-      let email = request.auth.token.email.lower();
-      return isHardcodedAdmin()
-        || (exists(/databases/$(database)/documents/user_roles/$(email))
-            && get(/databases/$(database)/documents/user_roles/$(email)).data.get('is_admin', false) == true);
+      return isSignedIn() && isActive();
     }
 
     // ---------- assets: the register's real financial data ----------
@@ -186,32 +119,13 @@ service cloud.firestore {
     match /ptr_itr/{id}           { allow read, write: if isSignedInActive(); }
     match /swa_records/{id}       { allow read, write: if isSignedInActive(); }
     match /history_of_repair/{id} { allow read, write: if isSignedInActive(); }
-    // ---------- user_roles: sign-in gate + per-tab access + the pending-approval queue ----------
-    // Read stays open to any merely-signed-in user (deliberately NOT gated by isApproved() —
-    // otherwise a brand-new, not-yet-approved Google sign-in couldn't even read their own pending
-    // doc back to know their status). The app's Access Role feature and Users & Roles admin page
-    // both still depend on every signed-in user being able to read the whole collection client-side
-    // — unchanged from before this pass. Only WRITE access is tightened here.
-    match /user_roles/{id} {
-      allow read: if isSignedIn();
-
-      // Two ways a doc can be created: (a) self-registration — a brand-new Google sign-in may
-      // create ONLY their own doc (id must equal their own lowercased email), and only as a
-      // non-admin, not-yet-approved pending request, so nobody can grant themselves approval or
-      // Admin this way; or (b) an existing Admin creating a role for someone else directly (the
-      // "+ Add user" flow in the Users & Roles tab), which may set approved/is_admin/tabs freely.
-      allow create: if (isSignedIn()
-          && id == request.auth.token.email.lower()
-          && request.resource.data.approved == false
-          && request.resource.data.get('is_admin', false) == false)
-        || (isSignedInActive() && isRoleAdmin());
-
-      // Everything else — approving/denying a pending request, editing tabs, promoting/demoting an
-      // Admin, deleting a role — now requires an existing Admin. This tightens what was previously
-      // "any signed-in+active user," which let any staff member edit ANYONE's role doc, including
-      // granting themselves Admin.
-      allow update, delete: if isSignedInActive() && isRoleAdmin();
-    }
+    // user_roles deliberately keeps the SAME coarse gate as every other collection (not restricted to
+    // admins) — the app's own Access Role feature relies on every signed-in user being able to read
+    // the whole collection client-side to compute their own tab access and to render "Users & Roles"
+    // for admins; restricting reads here without also reworking that client code would break the
+    // Access Role feature for ordinary (non-admin) users. Revisit this once/if that client-side
+    // dependency is reworked — see the Cloud Functions proposal's notes on this.
+    match /user_roles/{id}        { allow read, write: if isSignedInActive(); }
 
     // No catch-all match /{document=**} here on purpose — anything not explicitly listed above
     // (a typo'd collection name, a stray top-level doc from old testing/debugging) is denied by
