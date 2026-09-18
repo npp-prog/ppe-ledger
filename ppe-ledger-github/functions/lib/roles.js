@@ -25,9 +25,9 @@ const HARDCODED_ADMIN_EMAILS = ["npp@mgocandoniaccounting.org"];
 const EDITABLE_TABS = ["register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "hor", "retired"];
 const VIEW_ONLY_TABS = ["dashboard", "reports"];
 const ALL_PERMISSION_TABS = [...EDITABLE_TABS, ...VIEW_ONLY_TABS];
-// Must match js/app.js's HIDDEN_BY_DEFAULT_TABS exactly — these three start fully hidden, not just
+// Must match js/app.js's HIDDEN_BY_DEFAULT_TABS exactly — these start fully hidden, not just
 // view-only, for anyone without an explicit tabs entry (Sept 2026).
-const HIDDEN_BY_DEFAULT_TABS = ["swa", "cip", "retired"];
+const HIDDEN_BY_DEFAULT_TABS = ["swa", "cip", "retired", "depreciation", "reconciliation"];
 
 function isHardcodedAdmin(email) {
   return HARDCODED_ADMIN_EMAILS.some(e => e.toLowerCase() === (email || "").toLowerCase());

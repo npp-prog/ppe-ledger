@@ -254,11 +254,11 @@ const HARDCODED_ADMIN_EMAILS = ["npp@mgocandoniaccounting.org"];
 const EDITABLE_TABS = ["register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "hor", "retired"];
 const VIEW_ONLY_TABS = ["dashboard", "reports"];
 const ALL_PERMISSION_TABS = [...EDITABLE_TABS, ...VIEW_ONLY_TABS];
-// Sept 2026 — these three start HIDDEN, not just view-only, for anyone without an explicit tabs
-// entry (a brand-new approval, or an account with no role doc at all). An Admin can still turn one
-// back on for a specific person via "+ Add user" / "Approve with custom access…", same as any other
-// tab — this only changes what happens when nobody's touched that tab's setting yet.
-const HIDDEN_BY_DEFAULT_TABS = ["swa", "cip", "retired"];
+// Sept 2026 — these start HIDDEN, not just view-only, for anyone without an explicit tabs entry (a
+// brand-new approval, or an account with no role doc at all). An Admin can still turn one back on
+// for a specific person via "+ Add user" / "Approve with custom access…", same as any other tab —
+// this only changes what happens when nobody's touched that tab's setting yet.
+const HIDDEN_BY_DEFAULT_TABS = ["swa", "cip", "retired", "depreciation", "reconciliation"];
 
 // Municipal seal, embedded as a data: URI so the printed Equipment Ledger Card / Property Card
 // work with no external image request. Paste a "data:image/png;base64,...." string here (export
@@ -421,9 +421,9 @@ function isAdmin() {
  *    explicitly flip a tab to Edit (via "+ Add user" / "Approve with custom access…") for someone to
  *    write there; a plain "Approve" on a pending sign-in, or an account with no role doc at all,
  *    now lands the person in read-only View everywhere until an Admin deliberately grants more.
- *  - SWA, Construction in Progress, and Retired Assets default to fully HIDDEN ("none"), not just
- *    View, for the same "nobody's configured this yet" case — see HIDDEN_BY_DEFAULT_TABS. Every
- *    other tab still defaults to "view".
+ *  - SWA, Construction in Progress, Retired Assets, Depreciation, and Reconciliation default to
+ *    fully HIDDEN ("none"), not just View, for the same "nobody's configured this yet" case — see
+ *    HIDDEN_BY_DEFAULT_TABS. Every other tab still defaults to "view".
  *  - A role doc that simply omits a given tab key falls back to the same defaults above, for the
  *    same reason — a tab added in the future starts at its default for existing roles rather than
  *    silently inheriting full edit. */
@@ -4102,7 +4102,7 @@ function summarizeRoleAccess(role) {
   const notable = PERMISSION_TAB_ORDER
     .map(t => ({ t, def: HIDDEN_BY_DEFAULT_TABS.includes(t) ? "none" : "view", level: (role.tabs && role.tabs[t]) || (HIDDEN_BY_DEFAULT_TABS.includes(t) ? "none" : "view") }))
     .filter(x => x.level !== x.def);
-  if (!notable.length) return "Default access (view only; SWA/CIP/Retired hidden)";
+  if (!notable.length) return "Default access (view only; SWA/CIP/Retired/Depreciation/Reconciliation hidden)";
   return notable.map(x => `${permissionTabLabel(x.t)}: ${x.level === "none" ? "Hidden" : x.level === "edit" ? "Edit access" : "Visible (view only)"}`).join(", ");
 }
 /** True for a self-registered, not-yet-decided Google sign-in request (see checkOrRegisterApproval())
