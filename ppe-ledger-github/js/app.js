@@ -254,6 +254,11 @@ const HARDCODED_ADMIN_EMAILS = ["npp@mgocandoniaccounting.org"];
 const EDITABLE_TABS = ["register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "hor", "retired"];
 const VIEW_ONLY_TABS = ["dashboard", "reports"];
 const ALL_PERMISSION_TABS = [...EDITABLE_TABS, ...VIEW_ONLY_TABS];
+// Sept 2026 — these three start HIDDEN, not just view-only, for anyone without an explicit tabs
+// entry (a brand-new approval, or an account with no role doc at all). An Admin can still turn one
+// back on for a specific person via "+ Add user" / "Approve with custom access…", same as any other
+// tab — this only changes what happens when nobody's touched that tab's setting yet.
+const HIDDEN_BY_DEFAULT_TABS = ["swa", "cip", "retired"];
 
 // Municipal seal, embedded as a data: URI so the printed Equipment Ledger Card / Property Card
 // work with no external image request. Paste a "data:image/png;base64,...." string here (export
@@ -416,16 +421,20 @@ function isAdmin() {
  *    explicitly flip a tab to Edit (via "+ Add user" / "Approve with custom access…") for someone to
  *    write there; a plain "Approve" on a pending sign-in, or an account with no role doc at all,
  *    now lands the person in read-only View everywhere until an Admin deliberately grants more.
- *  - A role doc that simply omits a given tab key also defaults that tab to "view", for the same
- *    reason — a tab added in the future starts view-only for existing roles rather than silently
- *    inheriting full edit. */
+ *  - SWA, Construction in Progress, and Retired Assets default to fully HIDDEN ("none"), not just
+ *    View, for the same "nobody's configured this yet" case — see HIDDEN_BY_DEFAULT_TABS. Every
+ *    other tab still defaults to "view".
+ *  - A role doc that simply omits a given tab key falls back to the same defaults above, for the
+ *    same reason — a tab added in the future starts at its default for existing roles rather than
+ *    silently inheriting full edit. */
 function tabAccess(tabKey) {
   if (isAdmin()) return "edit";
   const role = S.userRoles.get(currentEmailLower());
-  if (!role) return "view";
+  const fallback = HIDDEN_BY_DEFAULT_TABS.includes(tabKey) ? "none" : "view";
+  if (!role) return fallback;
   const level = role.tabs && role.tabs[tabKey];
   if (level === "none" || level === "view" || level === "edit") return level;
-  return "view";
+  return fallback;
 }
 function hasTabAccess(tabKey) { return tabAccess(tabKey) !== "none"; }
 function canEdit(tabKey) { return tabAccess(tabKey) === "edit"; }
@@ -4091,10 +4100,10 @@ function permissionTabLabel(tabKey) { return (VIEW_TITLES[tabKey] || [tabKey])[0
 function summarizeRoleAccess(role) {
   if (role.is_admin) return "Full Admin";
   const notable = PERMISSION_TAB_ORDER
-    .map(t => ({ t, level: (role.tabs && role.tabs[t]) || "view" }))
-    .filter(x => x.level !== "view");
-  if (!notable.length) return "View only everywhere (no Edit access granted)";
-  return notable.map(x => `${permissionTabLabel(x.t)}: ${x.level === "none" ? "Hidden" : "Edit access"}`).join(", ");
+    .map(t => ({ t, def: HIDDEN_BY_DEFAULT_TABS.includes(t) ? "none" : "view", level: (role.tabs && role.tabs[t]) || (HIDDEN_BY_DEFAULT_TABS.includes(t) ? "none" : "view") }))
+    .filter(x => x.level !== x.def);
+  if (!notable.length) return "Default access (view only; SWA/CIP/Retired hidden)";
+  return notable.map(x => `${permissionTabLabel(x.t)}: ${x.level === "none" ? "Hidden" : x.level === "edit" ? "Edit access" : "Visible (view only)"}`).join(", ");
 }
 /** True for a self-registered, not-yet-decided Google sign-in request (see checkOrRegisterApproval())
  *  — distinct from an ordinary role doc that simply predates the `approved` field (those are treated
@@ -4208,11 +4217,12 @@ function openUserRoleModal(existingId) {
   const tabs = (r && r.tabs) || {};
   const optionsFor = (tabKey, selected) => {
     const levels = VIEW_ONLY_TABS.includes(tabKey) ? ["view", "none"] : ["edit", "view", "none"];
-    // Default preselection is "view" for every tab (Sept 2026 default-deny-edit change) — an Admin
-    // has to deliberately pick "Edit" here for someone to get write access to that tab. Since
-    // saveUserRole() below writes whatever's selected for every tab, this preselection IS what a
-    // brand-new user or a not-yet-configured tab actually gets saved as.
-    const cur = selected || "view";
+    // Default preselection (Sept 2026 default-deny-edit change): "view" for most tabs, but "none"
+    // (Hidden) for SWA/CIP/Retired Assets — see HIDDEN_BY_DEFAULT_TABS. An Admin has to deliberately
+    // pick a different level here for someone to get more than that. Since saveUserRole() below
+    // writes whatever's selected for every tab, this preselection IS what a brand-new user or a
+    // not-yet-configured tab actually gets saved as.
+    const cur = selected || (HIDDEN_BY_DEFAULT_TABS.includes(tabKey) ? "none" : "view");
     return levels.map(lv => `<option value="${lv}" ${lv === cur ? "selected" : ""}>${lv === "edit" ? "Edit" : lv === "view" ? "View only" : "Hidden"}</option>`).join("");
   };
   openModal(`

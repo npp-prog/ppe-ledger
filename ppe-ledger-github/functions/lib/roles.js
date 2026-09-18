@@ -25,6 +25,9 @@ const HARDCODED_ADMIN_EMAILS = ["npp@mgocandoniaccounting.org"];
 const EDITABLE_TABS = ["register", "depreciation", "reconciliation", "cip", "parics", "ptritr", "swa", "hor", "retired"];
 const VIEW_ONLY_TABS = ["dashboard", "reports"];
 const ALL_PERMISSION_TABS = [...EDITABLE_TABS, ...VIEW_ONLY_TABS];
+// Must match js/app.js's HIDDEN_BY_DEFAULT_TABS exactly — these three start fully hidden, not just
+// view-only, for anyone without an explicit tabs entry (Sept 2026).
+const HIDDEN_BY_DEFAULT_TABS = ["swa", "cip", "retired"];
 
 function isHardcodedAdmin(email) {
   return HARDCODED_ADMIN_EMAILS.some(e => e.toLowerCase() === (email || "").toLowerCase());
@@ -61,13 +64,15 @@ function isActive(role) {
 /** Returns "edit" | "view" | "none" for `tabKey`, given the caller's email
  *  and already-fetched role doc. Verbatim port of js/app.js's tabAccess() —
  *  default-deny-edit as of Sept 2026: no role doc, or a role doc that omits
- *  this tab key, now means "view", not "edit". Keep in sync with app.js. */
+ *  this tab key, now means "view" (or "none" for HIDDEN_BY_DEFAULT_TABS),
+ *  not "edit". Keep in sync with app.js. */
 function tabAccess(email, role, tabKey) {
   if (isAdmin(email, role)) return "edit";
-  if (!role) return "view";
+  const fallback = HIDDEN_BY_DEFAULT_TABS.includes(tabKey) ? "none" : "view";
+  if (!role) return fallback;
   const level = role.tabs && role.tabs[tabKey];
   if (level === "none" || level === "view" || level === "edit") return level;
-  return "view";
+  return fallback;
 }
 function hasTabAccess(email, role, tabKey) { return tabAccess(email, role, tabKey) !== "none"; }
 function canEdit(email, role, tabKey) { return tabAccess(email, role, tabKey) === "edit"; }
@@ -110,7 +115,7 @@ async function requireAdmin(db, auth, HttpsError) {
 }
 
 module.exports = {
-  HARDCODED_ADMIN_EMAILS, EDITABLE_TABS, VIEW_ONLY_TABS, ALL_PERMISSION_TABS,
+  HARDCODED_ADMIN_EMAILS, EDITABLE_TABS, VIEW_ONLY_TABS, ALL_PERMISSION_TABS, HIDDEN_BY_DEFAULT_TABS,
   isHardcodedAdmin, loadRoleForEmail, isAdmin, isActive, tabAccess, hasTabAccess, canEdit,
   requireEditAccess, requireAdmin,
 };
