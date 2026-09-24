@@ -77,20 +77,39 @@ async function exportFirestoreJson() {
 }
 
 /** Server-side copies every existing Storage file into backups/<date>/storage/<original path>,
- *  skipping anything already under backups/ so a backup never backs up an earlier backup. */
+ *  skipping anything already under backups/ so a backup never backs up an earlier backup.
+ *
+ *  Copies CONCURRENCY_LIMIT files at a time instead of one at a time — the first real run of this
+ *  function took long enough copying 73 files sequentially (one round trip, then a second round
+ *  trip for its size, per file) that it blew past the function's default 60-second timeout and got
+ *  marked "Failed" by Cloud Scheduler, even though the copy itself finished fine moments later.
+ *  Running a batch of files in parallel cuts that wall-clock time roughly by the batch size, so this
+ *  keeps working comfortably as the number of files grows, alongside the longer timeout set below. */
+const CONCURRENCY_LIMIT = 10;
+
+async function copyOneFile(file, dateStr) {
+  await file.copy(bucket().file(`backups/${dateStr}/storage/${file.name}`));
+  const [meta] = await file.getMetadata();
+  return Number(meta.size || 0);
+}
+
 async function copyStorageFilesToBackup(dateStr) {
-  const [files] = await bucket().getFiles();
-  let copied = 0, totalBytes = 0, skipped = 0;
-  for (const file of files) {
-    if (file.name.startsWith('backups/')) { skipped++; continue; }
-    try {
-      await file.copy(bucket().file(`backups/${dateStr}/storage/${file.name}`));
-      copied++;
-      const [meta] = await file.getMetadata();
-      totalBytes += Number(meta.size || 0);
-    } catch (e) {
-      console.error(`dailyBackup: failed to copy ${file.name}:`, e);
-    }
+  const [allFiles] = await bucket().getFiles();
+  const files = allFiles.filter(f => !f.name.startsWith('backups/'));
+  const skipped = allFiles.length - files.length;
+  let copied = 0, totalBytes = 0;
+
+  for (let i = 0; i < files.length; i += CONCURRENCY_LIMIT) {
+    const batch = files.slice(i, i + CONCURRENCY_LIMIT);
+    const results = await Promise.allSettled(batch.map(f => copyOneFile(f, dateStr)));
+    results.forEach((r, idx) => {
+      if (r.status === 'fulfilled') {
+        copied++;
+        totalBytes += r.value;
+      } else {
+        console.error(`dailyBackup: failed to copy ${batch[idx].name}:`, r.reason);
+      }
+    });
   }
   return { copied, totalBytes, skipped };
 }
@@ -99,6 +118,13 @@ exports.dailyBackup = onSchedule({
   schedule: 'every day 02:00',
   timeZone: 'Asia/Manila',
   secrets: [GMAIL_APP_PASSWORD],
+  // The default timeout (60s) is nowhere near enough for exporting every collection, copying every
+  // Storage file, and sending the email — the first real run took several minutes and got marked
+  // "Failed" by Cloud Scheduler purely from hitting that default, even though the backup itself
+  // completed correctly moments later. 540s (9 minutes) gives real headroom above that; bumping
+  // memory a bit too, since building the full Firestore JSON export in memory grows with the data.
+  timeoutSeconds: 540,
+  memory: '512MiB',
 }, async () => {
   const dateStr = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
 
