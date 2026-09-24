@@ -4394,8 +4394,15 @@ function assetEventTimeline(asset) {
     });
   }
   (asset.revaluations || []).forEach(r => {
+    // A revaluation whose reason starts with "CIP transfer" is a completed Construction-in-Progress
+    // project being transferred in as additional cost (see completeCipProject()), not a reappraisal
+    // — label it as an addition on the printed card instead of "Revaluation" (Sept 2026 fix). This
+    // only changes the printed label text; the stored revaluation record (old_cost/new_cost/reason)
+    // is untouched, and `kind` stays "revalue" so every other bit of logic keyed on it is unaffected.
+    const isCipAddition = (r.reason || "").startsWith("CIP transfer");
     events.push({
-      date: r.date, kind: "revalue", label: `Revaluation${r.reason ? " — " + r.reason : ""}`,
+      date: r.date, kind: "revalue",
+      label: isCipAddition ? `Addition — ${r.reason}` : `Revaluation${r.reason ? " — " + r.reason : ""}`,
       reference: "", newCost: r.new_cost,
     });
   });
@@ -4439,7 +4446,20 @@ function assetEventTimeline(asset) {
   events.sort((a, b) => String(a.date).localeCompare(String(b.date)));
   // Walk the sorted events, carrying running cost/AD forward so each row's Accumulated
   // Depreciation / Adjusted Cost reflect the asset's actual state at that point in time.
-  let runningCost = asset.cost || 0;
+  // runningCost STARTS at the cost as of acquisition — i.e., BEFORE any revaluation — not the
+  // asset's current (possibly already-revalued) cost field. Sept 2026 fix: this used to start from
+  // asset.cost directly, which is today's total including every revaluation/CIP-transfer addition
+  // ever applied — so the printed card's very first ("Acquisition") row showed today's full cost as
+  // if that had been the cost back on the acquisition date, and a later CIP-transfer addition then
+  // looked like it changed nothing (the "revalue" row just repeated the same already-inflated
+  // total). Deriving the true original cost from the EARLIEST recorded revaluation's old_cost (when
+  // one exists) restores the correct beginning balance, and each revaluation/addition still shows up
+  // as its own dated row moving the cost forward from there — i.e., an addition during the year,
+  // not baked into the beginning balance. Purely a report computation — no stored data changes.
+  const sortedRevaluations = [...(asset.revaluations || [])].sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  const originalCost = (sortedRevaluations[0] && sortedRevaluations[0].old_cost != null)
+    ? sortedRevaluations[0].old_cost : (asset.cost || 0);
+  let runningCost = originalCost;
   let runningAD = 0;
   return events.map(e => {
     if (e.kind === "acquire") runningAD = 0;
