@@ -13,6 +13,7 @@ admin.initializeApp();
 const assets = require('./assets');
 const depreciation = require('./depreciation');
 const grandfather = require('./grandfather');
+const backup = require('./backup');
 
 exports.createAsset = assets.createAsset;
 exports.updateAsset = assets.updateAsset;
@@ -25,3 +26,7 @@ exports.postDepreciationPeriod = depreciation.postDepreciationPeriod;
 // One-time (safely re-runnable) migration for the Google Sign-In pending-approval gate — see
 // the comment atop functions/grandfather.js and atop firestore.rules for the full story.
 exports.grandfatherExistingUsers = grandfather.grandfatherExistingUsers;
+
+// Nightly Firestore + Storage backup, emailed as a summary — see the big comment atop
+// functions/backup.js for what it does and the one-time setup it needs before it can deploy.
+exports.dailyBackup = backup.dailyBackup;
