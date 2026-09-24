@@ -1,0 +1,17 @@
+[debug] [2026-09-24T02:55:45.611Z] ----------------------------------------------------------------------
+[debug] [2026-09-24T02:55:45.622Z] Command:       C:\Program Files\nodejs\node.exe C:\Users\Windows\AppData\Roaming\npm\node_modules\firebase-tools\lib\bin\firebase.js deploy --only functions:dailyBackup
+[debug] [2026-09-24T02:55:45.623Z] CLI Version:   15.30.2
+[debug] [2026-09-24T02:55:45.623Z] Platform:      win32
+[debug] [2026-09-24T02:55:45.623Z] Node Version:  v22.23.2
+[debug] [2026-09-24T02:55:45.623Z] Detected Agent: unknown
+[debug] [2026-09-24T02:55:45.624Z] Time:          Thu Sep 24 2026 10:55:45 GMT+0800 (Philippine Standard Time)
+[debug] [2026-09-24T02:55:45.624Z] ----------------------------------------------------------------------
+[debug] 
+[debug] [2026-09-24T02:55:48.509Z] > command requires scopes: ["email","openid","https://www.googleapis.com/auth/cloudplatformprojects.readonly","https://www.googleapis.com/auth/firebase","https://www.googleapis.com/auth/cloud-platform"]
+[debug] [2026-09-24T02:55:48.510Z] > authorizing via signed-in user (npp@mgocandoniaccounting.org)
+[debug] [2026-09-24T02:55:48.510Z] [iam] checking project mgo-candoni-ppe for permissions ["cloudfunctions.functions.create","cloudfunctions.functions.delete","cloudfunctions.functions.get","cloudfunctions.functions.list","cloudfunctions.functions.update","cloudfunctions.operations.get","firebase.projects.get"]
+[debug] [2026-09-24T02:55:48.539Z] Checked if tokens are valid: true, expires at: 1790220168253
+[debug] [2026-09-24T02:55:48.539Z] Checked if tokens are valid: true, expires at: 1790220168253
+[debug] [2026-09-24T02:55:48.541Z] >>> [apiv2][query] POST https://cloudresourcemanager.googleapis.com/v1/projects/mgo-candoni-ppe:testIamPermissions [none]
+[debug] [2026-09-24T02:55:48.541Z] >>> [apiv2][(partial)header] POST https://cloudresourcemanager.googleapis.com/v1/projects/mgo-candoni-ppe:testIamPermissions  x-goog-user-project=mgo-candoni-ppe
+[debug] [2026-09-24T02:55:48.541Z] >>> [apiv2][body] POST https://cloudresourcemanager.googleapis.com/v1/projects/mgo-candoni-ppe:testIamPermissions {"permissions":["cloudfunctions.functions.create","cloudfunctions.functions.delete","cloudfunctions.functions.get","cloudfunctions.functions.list","cloudfunctions.functions.update","cloudfunctions.operations.get","firebase.projects.get"]}
